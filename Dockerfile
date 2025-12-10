@@ -51,11 +51,14 @@ FROM python:3.12-alpine AS python-builder
 # Install build dependencies for Python packages
 RUN apk add --no-cache \
     gcc \
+    g++ \
     musl-dev \
     libffi-dev \
     openssl-dev \
     cargo \
-    rust
+    rust \
+    linux-headers \
+    python3-dev
 
 WORKDIR /build
 
