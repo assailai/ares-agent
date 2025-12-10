@@ -13,7 +13,6 @@ on:
 
 env:
   REGISTRY_GHCR: ghcr.io
-  REGISTRY_DOCKER: docker.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -22,7 +21,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
 
     steps:
       - name: Checkout repository
@@ -43,12 +41,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY_DOCKER }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
@@ -56,7 +54,6 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
-            ${{ env.REGISTRY_DOCKER }}/aresenterpriseai/ares-agent
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -76,12 +73,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Run Docker Scout (vulnerability scan)
-        if: github.event_name != 'pull_request'
-        uses: docker/scout-action@v1
-        with:
-          command: cves
-          image: ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          only-severities: critical,high
-          exit-code: false  # Set to true to fail on vulnerabilities
