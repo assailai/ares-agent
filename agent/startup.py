@@ -1,0 +1,124 @@
+"""
+Ares Docker Agent - Startup Script
+Generates initial password and prints startup banner
+"""
+import socket
+import sys
+
+from agent.config import settings
+from agent.database.models import init_database, get_config, set_config, AgentConfig
+from agent.security.password import generate_password, hash_password
+from agent.security.session import create_admin_user, get_admin_user
+from agent.security.tls import ensure_tls_cert
+
+
+def get_container_ip() -> str:
+    """Get the container's IP address"""
+    try:
+        # Connect to an external address to determine our IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        # Fallback to hostname resolution
+        try:
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)
+        except Exception:
+            return "localhost"
+
+
+def initialize_agent():
+    """Initialize agent on first run"""
+    # Ensure directories exist
+    settings.ensure_directories()
+
+    # Initialize database
+    init_database()
+
+    # Generate TLS certificate if needed
+    ensure_tls_cert()
+
+    # Check if admin user exists
+    admin = get_admin_user()
+
+    if admin is None:
+        # First run - generate initial password
+        initial_password = generate_password(16)
+        password_hash = hash_password(initial_password)
+
+        # Create admin user
+        create_admin_user(password_hash, must_change_password=True)
+
+        # Store initial password for display (will be cleared after first login)
+        set_config(AgentConfig.INITIAL_PASSWORD, initial_password)
+
+        return initial_password
+
+    else:
+        # Existing admin - get stored initial password if still set
+        return get_config(AgentConfig.INITIAL_PASSWORD)
+
+
+def print_startup_banner(ip_address: str, port: int, initial_password: str = None):
+    """Print the startup banner with connection information"""
+
+    banner = f"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║     █████╗ ██████╗ ███████╗███████╗     █████╗  ██████╗ ███████╗    ║
+║    ██╔══██╗██╔══██╗██╔════╝██╔════╝    ██╔══██╗██╔════╝ ██╔════╝    ║
+║    ███████║██████╔╝█████╗  ███████╗    ███████║██║  ███╗█████╗      ║
+║    ██╔══██║██╔══██╗██╔══╝  ╚════██║    ██╔══██║██║   ██║██╔══╝      ║
+║    ██║  ██║██║  ██║███████╗███████║    ██║  ██║╚██████╔╝███████╗    ║
+║    ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ║
+║                                                                      ║
+║                    DOCKER AGENT v{settings.agent_version:<24}             ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  Web Interface:  https://{ip_address}:{port:<5}                         ║
+║                                                                      ║"""
+
+    if initial_password:
+        banner += f"""
+║  Initial Password:  {initial_password:<20}                         ║
+║                                                                      ║
+║  NOTE: You MUST change this password on first login.                 ║
+║                                                                      ║"""
+
+    banner += """
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  Getting Started:                                                    ║
+║  1. Open the web interface in your browser                           ║
+║  2. Login with the initial password                                  ║
+║  3. Complete the setup wizard to connect to Ares                     ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+
+    print(banner, flush=True)
+
+
+def main():
+    """Main startup function"""
+    print("Initializing Ares Docker Agent...", flush=True)
+
+    # Initialize and get initial password
+    initial_password = initialize_agent()
+
+    # Get container IP
+    ip_address = get_container_ip()
+
+    # Print startup banner
+    print_startup_banner(ip_address, settings.port, initial_password)
+
+    # Return success
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

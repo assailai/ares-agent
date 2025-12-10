@@ -1,0 +1,40 @@
+# =============================================================================
+# Ares Docker Agent - Docker Compose (for development/testing)
+# =============================================================================
+#
+# Usage:
+#   docker-compose up -d
+#   docker-compose logs -f
+#
+# =============================================================================
+
+version: '3.8'
+
+services:
+  ares-agent:
+    build: .
+    container_name: ares-docker-agent
+    hostname: ares-agent
+    ports:
+      - "8443:8443"
+    volumes:
+      - ares-agent-data:/data
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/data
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ares-agent-data:
+    driver: local
