@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Login - Ares Docker Agent{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <div class="login-box">
+        <h1>Ares Docker Agent</h1>
+        <p class="subtitle">Enter your password to continue</p>
+
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+
+        {% if message %}
+        <div class="alert alert-success">{{ message }}</div>
+        {% endif %}
+
+        <form method="POST" action="/login">
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required autofocus>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">Login</button>
+        </form>
+
+        <div class="hint">
+            <p><strong>First time logging in?</strong></p>
+            <p>Use the initial password shown when the container started.</p>
+            <p style="margin-top: 0.5rem;">To view the startup logs, run:</p>
+            <code style="display: block; margin-top: 0.5rem; padding: 0.5rem; background: var(--bg-primary); border-radius: 4px; font-size: 0.8rem;">$ sudo docker logs ares-agent</code>
+        </div>
+    </div>
+</div>
+{% endblock %}

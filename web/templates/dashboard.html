@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Ares Docker Agent{% endblock %}
+
+{% block header_nav %}
+<nav class="nav">
+    <a href="/dashboard" class="nav-link active">Dashboard</a>
+    <a href="/settings" class="nav-link">Settings</a>
+    <a href="/logout" class="nav-link">Logout</a>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h1>{{ agent_name }}</h1>
+
+    {% if message %}
+    <div class="alert alert-success">{{ message }}</div>
+    {% endif %}
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <!-- Status Cards -->
+    <div class="status-cards">
+        <div class="card status-card {% if health.status == 'healthy' %}status-healthy{% elif health.status == 'degraded' %}status-degraded{% else %}status-error{% endif %}">
+            <h3>Agent Status</h3>
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span class="status-text">{{ health.status | title }}</span>
+            </div>
+        </div>
+
+        <div class="card status-card {% if wireguard.connected %}status-healthy{% else %}status-error{% endif %}">
+            <h3>WireGuard Tunnel</h3>
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span class="status-text">{% if wireguard.connected %}Connected{% else %}Disconnected{% endif %}</span>
+            </div>
+            {% if wireguard.overlay_ip %}
+            <p class="status-detail">IP: {{ wireguard.overlay_ip }}</p>
+            {% endif %}
+        </div>
+
+        <div class="card status-card">
+            <h3>Platform</h3>
+            <p class="status-detail">{{ platform_url }}</p>
+            <p class="status-detail">Agent ID: {{ registration.agent_id[:8] if registration.agent_id else 'N/A' }}...</p>
+        </div>
+    </div>
+
+    <!-- Tunnel Details -->
+    <div class="card">
+        <h2>Tunnel Details</h2>
+        <div class="details-grid">
+            <div class="detail-item">
+                <dt>Overlay IP</dt>
+                <dd>{{ wireguard.overlay_ip or 'N/A' }}</dd>
+            </div>
+            <div class="detail-item">
+                <dt>Last Handshake</dt>
+                <dd>{{ wireguard.last_handshake or 'N/A' }}</dd>
+            </div>
+            <div class="detail-item">
+                <dt>Bytes Sent</dt>
+                <dd>{{ wireguard.bytes_sent | filesizeformat if wireguard.bytes_sent else '0 B' }}</dd>
+            </div>
+            <div class="detail-item">
+                <dt>Bytes Received</dt>
+                <dd>{{ wireguard.bytes_received | filesizeformat if wireguard.bytes_received else '0 B' }}</dd>
+            </div>
+        </div>
+
+        <div class="btn-group">
+            <form method="POST" action="/tunnel/restart" style="display: inline;">
+                <button type="submit" class="btn btn-secondary">Restart Tunnel</button>
+            </form>
+            {% if wireguard.connected %}
+            <form method="POST" action="/tunnel/stop" style="display: inline;">
+                <button type="submit" class="btn btn-warning">Stop Tunnel</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Internal Networks -->
+    <div class="card">
+        <h2>Internal Networks</h2>
+        <ul class="network-list">
+            {% for network in internal_networks %}
+            <li><code>{{ network }}</code></li>
+            {% else %}
+            <li>No networks configured</li>
+            {% endfor %}
+        </ul>
+        <a href="/settings" class="btn btn-secondary btn-small">Edit Networks</a>
+    </div>
+
+    <!-- Recent Activity -->
+    <div class="card">
+        <h2>Recent Activity</h2>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Action</th>
+                    <th>Details</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in audit_logs %}
+                <tr>
+                    <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                    <td>{{ log.action }}</td>
+                    <td>{{ log.details or '-' }}</td>
+                    <td>
+                        <span class="badge {% if log.success %}badge-success{% else %}badge-error{% endif %}">
+                            {{ 'Success' if log.success else 'Failed' }}
+                        </span>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4">No activity recorded</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <a href="/logs" class="btn btn-secondary btn-small">View All Logs</a>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Ares Docker Agent{% endblock %}
+
+{% block header_nav %}
+<nav class="nav">
+    <a href="/dashboard" class="nav-link">Dashboard</a>
+    <a href="/settings" class="nav-link active">Settings</a>
+    <a href="/logout" class="nav-link">Logout</a>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="settings">
+    <h1>Settings</h1>
+
+    {% if message %}
+    <div class="alert alert-success">{{ message }}</div>
+    {% endif %}
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <!-- Agent Information -->
+    <div class="card">
+        <h2>Agent Information</h2>
+        <form method="POST" action="/settings/agent-name">
+            <div class="form-group">
+                <label for="agent_name">Agent Name</label>
+                <input type="text" id="agent_name" name="agent_name"
+                       value="{{ agent_name }}" required minlength="3">
+            </div>
+            <button type="submit" class="btn btn-primary">Update Name</button>
+        </form>
+
+        <div class="details-grid" style="margin-top: 20px;">
+            <div class="detail-item">
+                <dt>Agent ID</dt>
+                <dd><code>{{ registration.agent_id or 'N/A' }}</code></dd>
+            </div>
+            <div class="detail-item">
+                <dt>Platform URL</dt>
+                <dd>{{ platform_url }}</dd>
+            </div>
+            <div class="detail-item">
+                <dt>Overlay IP</dt>
+                <dd>{{ registration.overlay_ip or 'N/A' }}</dd>
+            </div>
+        </div>
+    </div>
+
+    <!-- Internal Networks -->
+    <div class="card">
+        <h2>Internal Networks</h2>
+        <form method="POST" action="/settings/networks">
+            <div class="form-group">
+                <label for="internal_networks">Networks (one per line, CIDR notation)</label>
+                <textarea id="internal_networks" name="internal_networks" rows="5" required>{% for network in internal_networks %}{{ network }}
+{% endfor %}</textarea>
+                <small>Example: 10.0.0.0/8, 192.168.1.0/24</small>
+            </div>
+            <button type="submit" class="btn btn-primary">Update Networks</button>
+        </form>
+    </div>
+
+    <!-- Password -->
+    <div class="card">
+        <h2>Change Password</h2>
+        <a href="/change-password" class="btn btn-secondary">Change Password</a>
+    </div>
+
+    <!-- Danger Zone -->
+    <div class="card danger-zone">
+        <h2>Danger Zone</h2>
+        <p>Disconnect this agent from the Ares platform. This will stop the WireGuard tunnel and clear all registration data.</p>
+
+        <form method="POST" action="/disconnect">
+            <div class="form-group">
+                <label for="confirm">Type <strong>DISCONNECT</strong> to confirm</label>
+                <input type="text" id="confirm" name="confirm" placeholder="DISCONNECT" required>
+            </div>
+            <button type="submit" class="btn btn-danger">Disconnect from Platform</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

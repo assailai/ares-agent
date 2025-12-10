@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}Logs - Ares Docker Agent{% endblock %}
+
+{% block header_nav %}
+<nav class="nav">
+    <a href="/dashboard" class="nav-link">Dashboard</a>
+    <a href="/settings" class="nav-link">Settings</a>
+    <a href="/logout" class="nav-link">Logout</a>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="logs">
+    <h1>Audit Logs</h1>
+
+    <div class="card">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Action</th>
+                    <th>Details</th>
+                    <th>IP Address</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in audit_logs %}
+                <tr>
+                    <td>{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                    <td>{{ log.action }}</td>
+                    <td>{{ log.details or '-' }}</td>
+                    <td>{{ log.ip_address or '-' }}</td>
+                    <td>
+                        <span class="badge {% if log.success %}badge-success{% else %}badge-error{% endif %}">
+                            {{ 'Success' if log.success else 'Failed' }}
+                        </span>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5">No activity recorded</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <a href="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+</div>
+{% endblock %}
