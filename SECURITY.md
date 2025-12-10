@@ -57,6 +57,12 @@ The Ares Agent implements multiple layers of security:
 - Account lockout after failed attempts
 - Forced password change on first login
 
+### Data Protection
+- Sensitive data encrypted at rest using Fernet (AES-128-CBC + HMAC)
+- Encryption keys derived via HKDF with unique contexts per data type
+- Protected fields: WireGuard private key, JWT tokens, registration tokens
+- Master encryption key stored separately from database with 0600 permissions
+
 ### Network Security
 - TLS 1.2+ for all connections
 - WireGuard VPN with ChaCha20-Poly1305 encryption

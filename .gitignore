@@ -80,6 +80,10 @@ logs/
 *.sqlite
 *.sqlite3
 
+# Encryption keys (NEVER commit these)
+encryption.key
+*.key.bak
+
 # WireGuard configs (contain private keys)
 *.conf
 wg*.conf
