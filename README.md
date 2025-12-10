@@ -36,6 +36,7 @@ The Ares Agent establishes a secure WireGuard VPN tunnel from your internal netw
 
 - **Web-Based Setup Wizard** - Intuitive browser-based configuration with step-by-step guidance
 - **Secure by Default** - Non-root execution, TLS encryption, bcrypt password hashing, session management
+- **Encryption at Rest** - Sensitive data (keys, tokens) encrypted using Fernet (AES-128-CBC + HMAC)
 - **WireGuard VPN Tunnel** - Industry-standard encrypted tunnel using ChaCha20-Poly1305
 - **No Inbound Firewall Rules** - Agent initiates all connections; no ports need to be opened inbound
 - **Persistent Configuration** - Settings survive container restarts via Docker volumes
@@ -302,6 +303,12 @@ The Ares Agent is built with security as a top priority:
 - **Secure sessions** - 24-hour expiry, HttpOnly, SameSite=Strict cookies
 - **Account lockout** - 5 failed attempts triggers 30-minute lockout
 - **Forced password change** - Initial password must be changed on first login
+
+### Data Protection
+- **Encryption at rest** - Sensitive data encrypted using Fernet (AES-128-CBC + HMAC)
+- **Key derivation** - HKDF with unique contexts per data type
+- **Protected fields** - WireGuard private keys, JWT tokens, registration tokens
+- **Secure key storage** - Master encryption key stored with 0600 permissions
 
 ### Network Security
 - **TLS 1.2+** - Self-signed certificate auto-generated on first run
