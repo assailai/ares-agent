@@ -1,6 +1,6 @@
 # Ares Agent
 
-[![Docker Image Version](https://img.shields.io/docker/v/aresenterpriseai/ares-agent?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/aresenterpriseai/ares-agent)
+[![Docker Image Version](https://img.shields.io/docker/v/assailai/ares-agent?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/assailai/ares-agent)
 [![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-available-blue)](https://github.com/assailai/ares-agent/pkgs/container/ares-agent)
 [![License](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 [![Security Hardened](https://img.shields.io/badge/Security-Hardened-green.svg)](#security)
@@ -54,7 +54,7 @@ docker run -d \
   -p 8443:8443 \
   -v ares-agent-data:/data \
   --cap-add NET_ADMIN \
-  aresenterpriseai/ares-agent:latest
+  assailai/ares-agent:latest
 
 # Or using GitHub Container Registry
 docker run -d \
@@ -114,7 +114,7 @@ docker run -d \
   --cap-add NET_ADMIN \
   --security-opt no-new-privileges:true \
   --restart unless-stopped \
-  aresenterpriseai/ares-agent:latest
+  assailai/ares-agent:latest
 ```
 
 ### Docker Compose
@@ -126,7 +126,7 @@ version: '3.8'
 
 services:
   ares-agent:
-    image: aresenterpriseai/ares-agent:latest
+    image: assailai/ares-agent:latest
     container_name: ares-agent
     ports:
       - "8443:8443"
@@ -177,7 +177,7 @@ spec:
     spec:
       containers:
       - name: ares-agent
-        image: aresenterpriseai/ares-agent:latest
+        image: assailai/ares-agent:latest
         ports:
         - containerPort: 8443
           name: https
@@ -366,7 +366,7 @@ docker exec ares-agent wget -qO- --no-check-certificate https://localhost:8443/h
 
 ## Versioning
 
-We use [Semantic Versioning](https://semver.org/). For available versions, see the [tags on Docker Hub](https://hub.docker.com/r/aresenterpriseai/ares-agent/tags).
+We use [Semantic Versioning](https://semver.org/). For available versions, see the [tags on Docker Hub](https://hub.docker.com/r/assailai/ares-agent/tags).
 
 | Version | Status | Notes |
 |---------|--------|-------|
