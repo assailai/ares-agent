@@ -51,19 +51,29 @@ The Ares Agent establishes a secure WireGuard VPN tunnel from your internal netw
 # Using Docker Hub
 docker run -d \
   --name ares-agent \
+  --user root \
+  --privileged \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --cap-add NET_ADMIN \
+  -v /lib/modules:/lib/modules:ro \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   assailai/ares-agent:latest
 
 # Or using GitHub Container Registry
 docker run -d \
   --name ares-agent \
+  --user root \
+  --privileged \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --cap-add NET_ADMIN \
+  -v /lib/modules:/lib/modules:ro \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   ghcr.io/assailai/ares-agent:latest
 ```
+
+> **Note:** The `--privileged` flag and `--user root` are required for WireGuard VPN to function properly. The `ARES_RUN_AS_ROOT=true` environment variable prevents privilege dropping so WireGuard can manage network interfaces.
 
 ### Get Initial Password
 
@@ -75,7 +85,7 @@ You'll see output like:
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    ARES DOCKER AGENT v1.0.5                          ║
+║                    ARES DOCKER AGENT v1.1.0                          ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  Web Interface:  https://192.168.1.50:8443                           ║
 ║  Initial Password:  xK9#mP2$vL5@nQ8                                  ║
@@ -96,7 +106,9 @@ You'll see output like:
 | Requirement | Details |
 |-------------|---------|
 | **Docker** | Version 20.10 or later |
-| **Capability** | `NET_ADMIN` (required for WireGuard VPN) |
+| **Privileges** | `--privileged` and `--user root` (required for WireGuard VPN) |
+| **TUN Device** | `--device /dev/net/tun:/dev/net/tun` |
+| **Kernel Modules** | `-v /lib/modules:/lib/modules:ro` (for WireGuard kernel module) |
 | **Outbound UDP** | Port 51820 to Ares platform (WireGuard) |
 | **Outbound TCP** | Port 443 to Ares platform (Registration) |
 | **Memory** | Minimum 256MB |
@@ -109,10 +121,13 @@ You'll see output like:
 ```bash
 docker run -d \
   --name ares-agent \
+  --user root \
+  --privileged \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --cap-add NET_ADMIN \
-  --security-opt no-new-privileges:true \
+  -v /lib/modules:/lib/modules:ro \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   --restart unless-stopped \
   assailai/ares-agent:latest
 ```
@@ -128,14 +143,17 @@ services:
   ares-agent:
     image: assailai/ares-agent:latest
     container_name: ares-agent
+    user: root
+    privileged: true
     ports:
       - "8443:8443"
     volumes:
       - ares-agent-data:/data
-    cap_add:
-      - NET_ADMIN
-    security_opt:
-      - no-new-privileges:true
+      - /lib/modules:/lib/modules:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - ARES_RUN_AS_ROOT=true
     sysctls:
       - net.ipv4.ip_forward=1
     restart: unless-stopped
@@ -181,13 +199,18 @@ spec:
         ports:
         - containerPort: 8443
           name: https
+        env:
+        - name: ARES_RUN_AS_ROOT
+          value: "true"
         volumeMounts:
         - name: data
           mountPath: /data
+        - name: lib-modules
+          mountPath: /lib/modules
+          readOnly: true
         securityContext:
-          capabilities:
-            add:
-            - NET_ADMIN
+          privileged: true
+          runAsUser: 0
         resources:
           requests:
             memory: "256Mi"
@@ -213,6 +236,10 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: ares-agent-pvc
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+          type: Directory
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -255,6 +282,7 @@ spec:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `ARES_RUN_AS_ROOT` | `false` | Set to `true` to keep running as root (required for WireGuard) |
 | `DATA_DIR` | `/data` | Directory for persistent data |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `HTTPS_PORT` | `8443` | Port for web interface |
@@ -292,11 +320,10 @@ spec:
 The Ares Agent is built with security as a top priority:
 
 ### Container Security
-- **Non-root execution** - Runs as unprivileged user (UID 10001) after initial network setup
+- **Privileged mode required** - WireGuard VPN requires root and privileged mode for kernel module access
 - **Minimal attack surface** - Multi-stage build with only runtime dependencies
 - **No secrets in image** - All credentials provided at runtime
-- **Security options** - Compatible with `--security-opt no-new-privileges:true`
-- **Read-only compatible** - Can run with read-only root filesystem
+- **Isolated networking** - WireGuard creates an isolated overlay network
 
 ### Authentication & Sessions
 - **bcrypt password hashing** - Cost factor 12
@@ -326,9 +353,9 @@ The Ares Agent is built with security as a top priority:
 
 **Symptom:** Container exits immediately
 
-**Solution:** Ensure `NET_ADMIN` capability is provided:
+**Solution:** Ensure all required flags are provided:
 ```bash
-docker run --cap-add NET_ADMIN ...
+docker run --user root --privileged --device /dev/net/tun:/dev/net/tun -e ARES_RUN_AS_ROOT=true ...
 ```
 
 ### Can't Access Web Interface
@@ -370,7 +397,8 @@ We use [Semantic Versioning](https://semver.org/). For available versions, see t
 
 | Version | Status | Notes |
 |---------|--------|-------|
-| 1.0.x | Current | Production ready |
+| 1.1.x | Current | WireGuard fixes, requires privileged mode |
+| 1.0.x | Legacy | May have WireGuard connectivity issues |
 
 ## Support
 
