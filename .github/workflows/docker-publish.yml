@@ -67,7 +67,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # Note: arm64 disabled due to grpcio compilation issues on Alpine/musl
+          # grpcio doesn't provide pre-built wheels for linux/arm64/musl and
+          # compilation fails. Re-enable when grpcio provides arm64-musl wheels.
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
