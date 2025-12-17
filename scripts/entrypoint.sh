@@ -53,21 +53,34 @@ if [ "$CURRENT_UID" = "0" ]; then
     fi
 
     # =============================================================================
-    # Phase 2: Drop privileges and run as non-root user
+    # Phase 2: Run application (optionally drop privileges)
     # =============================================================================
-
-    log_info "Dropping privileges to user '${ARES_USER:-ares}' (UID: ${ARES_UID:-10001})..."
 
     # Change to app directory
     cd /app
 
-    # Run startup script as non-root user
-    log_info "Running initialization..."
-    su-exec "${ARES_USER:-ares}" python -u -m agent.startup
+    # Check if we should keep running as root (needed for WireGuard)
+    if [ "${ARES_RUN_AS_ROOT:-false}" = "true" ]; then
+        log_info "Running as root (ARES_RUN_AS_ROOT=true) - required for WireGuard VPN..."
 
-    # Start the FastAPI server as non-root user
-    log_info "Starting web server on port ${HTTPS_PORT:-8443}..."
-    exec su-exec "${ARES_USER:-ares}" python -u -m agent.main
+        # Run startup script as root
+        log_info "Running initialization..."
+        python -u -m agent.startup
+
+        # Start the FastAPI server as root
+        log_info "Starting web server on port ${HTTPS_PORT:-8443}..."
+        exec python -u -m agent.main
+    else
+        log_info "Dropping privileges to user '${ARES_USER:-ares}' (UID: ${ARES_UID:-10001})..."
+
+        # Run startup script as non-root user
+        log_info "Running initialization..."
+        su-exec "${ARES_USER:-ares}" python -u -m agent.startup
+
+        # Start the FastAPI server as non-root user
+        log_info "Starting web server on port ${HTTPS_PORT:-8443}..."
+        exec su-exec "${ARES_USER:-ares}" python -u -m agent.main
+    fi
 else
     # =============================================================================
     # Running as non-root (default, Docker Scout compliant)

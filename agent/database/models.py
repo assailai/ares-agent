@@ -7,11 +7,8 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, create_
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 import json
-import logging
 
 from agent.config import settings
-
-logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -151,38 +148,13 @@ def get_session():
     return SessionLocal()
 
 
-# Keys that should always be encrypted
-ENCRYPTED_KEYS = {
-    AgentConfig.WIREGUARD_PRIVATE_KEY: "wireguard_private_key",
-    AgentConfig.JWT_TOKEN: "jwt_token",
-    AgentConfig.INITIAL_PASSWORD: "initial_password",
-    AgentConfig.REGISTRATION_TOKEN: "registration_token",
-}
-
-
-def _get_encryption_context(key: str) -> Optional[str]:
-    """Get encryption context for a key, or None if not encrypted"""
-    return ENCRYPTED_KEYS.get(key)
-
-
 # Configuration helper functions
 def get_config(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Get configuration value by key, automatically decrypting if needed"""
-    # Import here to avoid circular imports
-    from agent.security.encryption import decrypt_value, is_encrypted
-
+    """Get configuration value by key"""
     session = get_session()
     try:
         config = session.query(AgentConfig).filter(AgentConfig.key == key).first()
-        if config and config.value:
-            # Check if value needs decryption
-            if config.encrypted and is_encrypted(config.value):
-                context = _get_encryption_context(key) or "default"
-                try:
-                    return decrypt_value(config.value, context)
-                except ValueError as e:
-                    logger.error(f"Failed to decrypt config {key}: {e}")
-                    return default
+        if config:
             return config.value
         return default
     finally:
@@ -190,29 +162,16 @@ def get_config(key: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def set_config(key: str, value: str, encrypted: bool = False):
-    """Set configuration value, automatically encrypting sensitive keys"""
-    # Import here to avoid circular imports
-    from agent.security.encryption import encrypt_value
-
-    # Auto-detect if this key should be encrypted
-    encryption_context = _get_encryption_context(key)
-    should_encrypt = encrypted or (encryption_context is not None)
-
-    # Encrypt the value if needed
-    stored_value = value
-    if should_encrypt and value:
-        context = encryption_context or "default"
-        stored_value = encrypt_value(value, context)
-
+    """Set configuration value"""
     session = get_session()
     try:
         config = session.query(AgentConfig).filter(AgentConfig.key == key).first()
         if config:
-            config.value = stored_value
-            config.encrypted = should_encrypt
+            config.value = value
+            config.encrypted = encrypted
             config.updated_at = datetime.utcnow()
         else:
-            config = AgentConfig(key=key, value=stored_value, encrypted=should_encrypt)
+            config = AgentConfig(key=key, value=value, encrypted=encrypted)
             session.add(config)
         session.commit()
     finally:

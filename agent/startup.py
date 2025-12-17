@@ -2,6 +2,7 @@
 Ares Docker Agent - Startup Script
 Generates initial password and prints startup banner
 """
+import os
 import socket
 import sys
 
@@ -28,6 +29,46 @@ def get_container_ip() -> str:
             return socket.gethostbyname(hostname)
         except Exception:
             return "localhost"
+
+
+def get_host_ip() -> str | None:
+    """
+    Try to detect the Docker host's IP address.
+    Returns None if unable to detect.
+    """
+    # Method 1: Check for explicit HOST_IP environment variable
+    host_ip = os.environ.get('HOST_IP')
+    if host_ip:
+        return host_ip
+
+    # Method 2: Try host.docker.internal (works on Docker Desktop for Mac/Windows)
+    try:
+        ip = socket.gethostbyname('host.docker.internal')
+        if ip:
+            return ip
+    except socket.gaierror:
+        pass
+
+    # Method 3: Read the default gateway from /proc/net/route (Linux)
+    # On Docker bridge networks, the gateway is typically the host
+    try:
+        with open('/proc/net/route', 'r') as f:
+            for line in f:
+                fields = line.strip().split()
+                if len(fields) >= 3 and fields[1] == '00000000':  # Default route
+                    gateway_hex = fields[2]
+                    # Convert hex to IP (stored in little-endian)
+                    gateway_ip = '.'.join([
+                        str(int(gateway_hex[i:i+2], 16))
+                        for i in range(6, -1, -2)
+                    ])
+                    # Validate it's not 0.0.0.0
+                    if gateway_ip != '0.0.0.0':
+                        return gateway_ip
+    except Exception:
+        pass
+
+    return None
 
 
 def initialize_agent():
@@ -62,7 +103,7 @@ def initialize_agent():
         return get_config(AgentConfig.INITIAL_PASSWORD)
 
 
-def print_startup_banner(ip_address: str, port: int, initial_password: str = None):
+def print_startup_banner(container_ip: str, host_ip: str | None, port: int, initial_password: str = None):
     """Print the startup banner with connection information"""
 
     banner = f"""
@@ -79,11 +120,23 @@ def print_startup_banner(ip_address: str, port: int, initial_password: str = Non
 ║                                                                      ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                      ║
-║  Web Interface:  https://{ip_address}:{port:<5}                         ║
+║  Web Interface (container):  https://{container_ip}:{port:<5}               ║
+║  Web Interface (host):       https://localhost:{port:<5}                    ║"""
+
+    if host_ip:
+        banner += f"""
+║  Web Interface (network):    https://{host_ip}:{port:<5}               ║"""
+
+    banner += """
+║                                                                      ║
+║  The agent is listening on all interfaces (0.0.0.0).                 ║
+║  Use the host URL from localhost or the network URL from remote.     ║
 ║                                                                      ║"""
 
     if initial_password:
         banner += f"""
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
 ║  Initial Password:  {initial_password:<20}                         ║
 ║                                                                      ║
 ║  NOTE: You MUST change this password on first login.                 ║
@@ -96,6 +149,8 @@ def print_startup_banner(ip_address: str, port: int, initial_password: str = Non
 ║  1. Open the web interface in your browser                           ║
 ║  2. Login with the initial password                                  ║
 ║  3. Complete the setup wizard to connect to Ares                     ║
+║                                                                      ║
+║  NOTE: Remote access may require opening port 8443 in your firewall. ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
@@ -110,11 +165,12 @@ def main():
     # Initialize and get initial password
     initial_password = initialize_agent()
 
-    # Get container IP
-    ip_address = get_container_ip()
+    # Get container IP and host IP
+    container_ip = get_container_ip()
+    host_ip = get_host_ip()
 
     # Print startup banner
-    print_startup_banner(ip_address, settings.port, initial_password)
+    print_startup_banner(container_ip, host_ip, settings.port, initial_password)
 
     # Return success
     return 0

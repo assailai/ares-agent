@@ -13,11 +13,14 @@
 #
 # Usage:
 #   docker run -d --name ares-agent \
+#     --user root \
+#     --privileged \
 #     -p 8443:8443 \
 #     -v ares-agent-data:/data \
-#     --cap-add NET_ADMIN \
-#     --security-opt no-new-privileges:true \
-#     aresenterpriseai/ares-agent:1.0.0
+#     -v /lib/modules:/lib/modules:ro \
+#     --device /dev/net/tun:/dev/net/tun \
+#     -e ARES_RUN_AS_ROOT=true \
+#     assailai/ares-agent:latest
 #
 # =============================================================================
 
@@ -51,14 +54,11 @@ FROM python:3.12-alpine AS python-builder
 # Install build dependencies for Python packages
 RUN apk add --no-cache \
     gcc \
-    g++ \
     musl-dev \
     libffi-dev \
     openssl-dev \
     cargo \
-    rust \
-    linux-headers \
-    python3-dev
+    rust
 
 WORKDIR /build
 
@@ -75,7 +75,7 @@ FROM python:3.12-alpine
 # Security labels
 LABEL maintainer="Assail AI <support@assail.ai>"
 LABEL description="Ares Docker Agent - Secure agent for internal API scanning"
-LABEL version="1.0.5"
+LABEL version="1.1.0"
 LABEL org.opencontainers.image.source="https://github.com/assailai/ares-agent"
 LABEL org.opencontainers.image.licenses="Proprietary"
 LABEL org.opencontainers.image.vendor="Assail AI"

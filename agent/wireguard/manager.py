@@ -4,6 +4,7 @@ Manages wireguard-go userspace implementation
 """
 import asyncio
 import subprocess
+import os
 import re
 import logging
 from datetime import datetime
@@ -69,12 +70,19 @@ class WireGuardManager:
 
             if result.returncode != 0:
                 # Kernel module not available, fall back to wireguard-go
-                logger.info("Kernel WireGuard not available, trying wireguard-go")
+                logger.info(f"Kernel WireGuard not available (error: {result.stderr.strip()}), trying wireguard-go")
+
+                # Create environment with flags to suppress kernel warning and run in foreground
+                # WG_PROCESS_FOREGROUND=1 suppresses the "kernel has first class support" warning
+                wg_env = os.environ.copy()
+                wg_env["WG_PROCESS_FOREGROUND"] = "1"
+
+                logger.info(f"Starting wireguard-go with WG_PROCESS_FOREGROUND=1")
                 self._process = subprocess.Popen(
                     ["wireguard-go", "-f", self.interface],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env={**subprocess.os.environ, "WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD": "1"}
+                    env=wg_env
                 )
 
                 # Wait a moment for interface to come up
