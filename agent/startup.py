@@ -107,52 +107,40 @@ def print_startup_banner(container_ip: str, host_ip: str | None, port: int, init
     """Print the startup banner with connection information"""
 
     banner = f"""
-╔══════════════════════════════════════════════════════════════════════╗
-║                                                                      ║
-║     █████╗ ██████╗ ███████╗███████╗     █████╗  ██████╗ ███████╗    ║
-║    ██╔══██╗██╔══██╗██╔════╝██╔════╝    ██╔══██╗██╔════╝ ██╔════╝    ║
-║    ███████║██████╔╝█████╗  ███████╗    ███████║██║  ███╗█████╗      ║
-║    ██╔══██║██╔══██╗██╔══╝  ╚════██║    ██╔══██║██║   ██║██╔══╝      ║
-║    ██║  ██║██║  ██║███████╗███████║    ██║  ██║╚██████╔╝███████╗    ║
-║    ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ║
-║                                                                      ║
-║                    DOCKER AGENT v{settings.agent_version:<24}             ║
-║                                                                      ║
-╠══════════════════════════════════════════════════════════════════════╣
-║                                                                      ║
-║  Web Interface (container):  https://{container_ip}:{port:<5}               ║
-║  Web Interface (host):       https://localhost:{port:<5}                    ║"""
-
-    if host_ip:
-        banner += f"""
-║  Web Interface (network):    https://{host_ip}:{port:<5}               ║"""
-
-    banner += """
-║                                                                      ║
-║  The agent is listening on all interfaces (0.0.0.0).                 ║
-║  Use the host URL from localhost or the network URL from remote.     ║
-║                                                                      ║"""
+╔════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                    ║
+║   █████╗ ██████╗ ███████╗███████╗     █████╗  ██████╗ ███████╗███╗   ██╗████████╗  ║
+║  ██╔══██╗██╔══██╗██╔════╝██╔════╝    ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝  ║
+║  ███████║██████╔╝█████╗  ███████╗    ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║     ║
+║  ██╔══██║██╔══██╗██╔══╝  ╚════██║    ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║     ║
+║  ██║  ██║██║  ██║███████╗███████║    ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║     ║
+║  ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝     ║
+║                                                                                    ║
+║                         DOCKER AGENT v{settings.agent_version:<29}              ║
+║                                                                                    ║
+╠════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                    ║
+║  Web Interface:  https://{container_ip}:{port:<47}  ║
+║                                                                                    ║"""
 
     if initial_password:
         banner += f"""
-╠══════════════════════════════════════════════════════════════════════╣
-║                                                                      ║
-║  Initial Password:  {initial_password:<20}                         ║
-║                                                                      ║
-║  NOTE: You MUST change this password on first login.                 ║
-║                                                                      ║"""
+╠════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                    ║
+║  Initial Password:  {initial_password:<30}                              ║
+║                                                                                    ║
+║  NOTE: You MUST change this password on first login.                               ║
+║                                                                                    ║"""
 
     banner += """
-╠══════════════════════════════════════════════════════════════════════╣
-║                                                                      ║
-║  Getting Started:                                                    ║
-║  1. Open the web interface in your browser                           ║
-║  2. Login with the initial password                                  ║
-║  3. Complete the setup wizard to connect to Ares                     ║
-║                                                                      ║
-║  NOTE: Remote access may require opening port 8443 in your firewall. ║
-║                                                                      ║
-╚══════════════════════════════════════════════════════════════════════╝
+╠════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                    ║
+║  Getting Started:                                                                  ║
+║  1. Open the web interface in your browser                                         ║
+║  2. Login with the initial password                                                ║
+║  3. Complete the setup wizard to connect to Ares                                   ║
+║                                                                                    ║
+╚════════════════════════════════════════════════════════════════════════════════════╝
 """
 
     print(banner, flush=True)
