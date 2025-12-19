@@ -383,15 +383,30 @@ docker run -d \
 3. Verify platform URL is correct
 4. Check agent logs in web interface (Dashboard > Logs)
 
-### Forgot Password
+### Forgot Password / Complete Reinstall
 
-Reset by removing the data volume:
+If you forgot your password, need to re-register with a new token, or encounter any issues, perform a complete reinstall:
+
 ```bash
-docker stop ares-agent
-docker rm ares-agent
+# Remove existing container and data
+docker rm -f ares-agent
 docker volume rm ares-agent-data
-# Re-run the container to get a new initial password
+
+# Fresh install
+docker run -d \
+  --name ares-agent \
+  --user root \
+  --privileged \
+  -p 8443:8443 \
+  -v ares-agent-data:/data \
+  -v /lib/modules:/lib/modules:ro \
+  --device /dev/net/tun:/dev/net/tun \
+  --entrypoint /bin/sh \
+  assailai/ares-agent:latest \
+  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
 ```
+
+Then get the new initial password with `docker logs ares-agent` and complete the setup wizard.
 
 ### Health Check Failing
 
