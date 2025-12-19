@@ -179,6 +179,10 @@ async def change_password(
     new_hash = hash_password(new_password)
     update_admin_password(new_hash, must_change=False)
 
+    # Clear the initial password from config (no longer valid)
+    from agent.database.models import set_config, AgentConfig
+    set_config(AgentConfig.INITIAL_PASSWORD, "")
+
     # Destroy all sessions (force re-login)
     destroy_all_sessions()
 

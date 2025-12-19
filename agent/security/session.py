@@ -128,8 +128,11 @@ def create_admin_user(password_hash: str, must_change_password: bool = True) -> 
         db.close()
 
 
-def update_admin_password(new_password_hash: str, must_change: bool = False):
-    """Update admin user password"""
+def update_admin_password(new_password_hash: str, must_change: bool = False) -> bool:
+    """Update admin user password. Returns True if successful."""
+    import logging
+    logger = logging.getLogger(__name__)
+
     db = get_db_session()
     try:
         admin = db.query(AdminUser).first()
@@ -138,6 +141,15 @@ def update_admin_password(new_password_hash: str, must_change: bool = False):
             admin.must_change_password = must_change
             admin.updated_at = datetime.utcnow()
             db.commit()
+            logger.info("Admin password updated successfully")
+            return True
+        else:
+            logger.error("Cannot update password: no admin user found in database")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to update admin password: {e}")
+        db.rollback()
+        return False
     finally:
         db.close()
 

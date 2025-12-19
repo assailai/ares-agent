@@ -192,6 +192,9 @@ async def setup_step5(
     new_hash = hash_password(new_password)
     update_admin_password(new_hash, must_change=False)
 
+    # Clear the initial password from config (no longer valid)
+    set_config(AgentConfig.INITIAL_PASSWORD, "")
+
     add_audit_log(AuditLog.ACTION_PASSWORD_CHANGED, ip_address=get_client_ip(request))
 
     return RedirectResponse(url="/setup?step=6", status_code=302)

@@ -100,7 +100,9 @@ def initialize_agent():
 
     else:
         # Existing admin - get stored initial password if still set
-        return get_config(AgentConfig.INITIAL_PASSWORD)
+        # Returns empty string if password was changed (cleared from config)
+        initial_pwd = get_config(AgentConfig.INITIAL_PASSWORD, "")
+        return initial_pwd if initial_pwd else None
 
 
 def print_startup_banner(container_ip: str, host_ip: str | None, port: int, initial_password: str = None):
