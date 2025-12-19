@@ -122,16 +122,23 @@ class TunnelStatus(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-# Database engine and session
+# Database engine and session - singleton pattern
+_engine = None
+_SessionLocal = None
+
+
 def get_engine():
-    """Create SQLite engine"""
-    settings.ensure_directories()
-    return create_engine(
-        f"sqlite:///{settings.database_path}",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-        echo=False
-    )
+    """Get or create SQLite engine (singleton)"""
+    global _engine
+    if _engine is None:
+        settings.ensure_directories()
+        _engine = create_engine(
+            f"sqlite:///{settings.database_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            echo=False
+        )
+    return _engine
 
 
 def init_database():
@@ -142,10 +149,12 @@ def init_database():
 
 
 def get_session():
-    """Get database session"""
-    engine = get_engine()
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    return SessionLocal()
+    """Get database session (uses singleton engine)"""
+    global _SessionLocal
+    if _SessionLocal is None:
+        engine = get_engine()
+        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return _SessionLocal()
 
 
 # Configuration helper functions
