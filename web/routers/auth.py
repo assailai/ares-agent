@@ -175,11 +175,17 @@ async def change_password(
             "password_requirements": get_password_requirements()
         })
 
-    # Update password
+    # Update password - MUST check return value!
     new_hash = hash_password(new_password)
-    update_admin_password(new_hash, must_change=False)
+    if not update_admin_password(new_hash, must_change=False):
+        # Password update failed - keep the old password valid
+        return templates.TemplateResponse("change_password.html", {
+            "request": request,
+            "error": "Failed to update password. Please try again.",
+            "password_requirements": get_password_requirements()
+        })
 
-    # Clear the initial password from config (no longer valid)
+    # Only clear the initial password AFTER successful update
     from agent.database.models import set_config, AgentConfig
     set_config(AgentConfig.INITIAL_PASSWORD, "")
 
