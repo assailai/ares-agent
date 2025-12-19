@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 [![Security Hardened](https://img.shields.io/badge/Security-Hardened-green.svg)](#security)
 
-Customer-deployable Docker agent for scanning internal APIs through the [Ares](https://assail.ai) platform. Deploy this agent inside your network to enable secure API security testing of internal services that aren't exposed to the internet.
+Customer-deployable Docker agent for scanning internal APIs through the [Ares](https://www.assailai.com) platform. Deploy this agent inside your network to enable secure API security testing of internal services that aren't exposed to the internet.
 
 ## Overview
 
@@ -57,8 +57,9 @@ docker run -d \
   -v ares-agent-data:/data \
   -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  -e ARES_RUN_AS_ROOT=true \
-  assailai/ares-agent:latest
+  --entrypoint /bin/sh \
+  assailai/ares-agent:latest \
+  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
 
 # Or using GitHub Container Registry
 docker run -d \
@@ -69,11 +70,12 @@ docker run -d \
   -v ares-agent-data:/data \
   -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  -e ARES_RUN_AS_ROOT=true \
-  ghcr.io/assailai/ares-agent:latest
+  --entrypoint /bin/sh \
+  ghcr.io/assailai/ares-agent:latest \
+  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
 ```
 
-> **Note:** The `--privileged` flag and `--user root` are required for WireGuard VPN to function properly. The `ARES_RUN_AS_ROOT=true` environment variable prevents privilege dropping so WireGuard can manage network interfaces.
+> **Note:** The `--privileged` flag and `--user root` are required for WireGuard VPN to function properly. The custom entrypoint enables IP forwarding and starts the agent directly.
 
 ### Get Initial Password
 
@@ -127,9 +129,10 @@ docker run -d \
   -v ares-agent-data:/data \
   -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  -e ARES_RUN_AS_ROOT=true \
   --restart unless-stopped \
-  assailai/ares-agent:latest
+  --entrypoint /bin/sh \
+  assailai/ares-agent:latest \
+  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
 ```
 
 ### Docker Compose
@@ -145,6 +148,8 @@ services:
     container_name: ares-agent
     user: root
     privileged: true
+    entrypoint: /bin/sh
+    command: -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
     ports:
       - "8443:8443"
     volumes:
@@ -152,10 +157,6 @@ services:
       - /lib/modules:/lib/modules:ro
     devices:
       - /dev/net/tun:/dev/net/tun
-    environment:
-      - ARES_RUN_AS_ROOT=true
-    sysctls:
-      - net.ipv4.ip_forward=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://localhost:8443/health"]
@@ -196,12 +197,11 @@ spec:
       containers:
       - name: ares-agent
         image: assailai/ares-agent:latest
+        command: ["/bin/sh"]
+        args: ["-c", "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"]
         ports:
         - containerPort: 8443
           name: https
-        env:
-        - name: ARES_RUN_AS_ROOT
-          value: "true"
         volumeMounts:
         - name: data
           mountPath: /data
@@ -282,7 +282,6 @@ spec:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARES_RUN_AS_ROOT` | `false` | Set to `true` to keep running as root (required for WireGuard) |
 | `DATA_DIR` | `/data` | Directory for persistent data |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `HTTPS_PORT` | `8443` | Port for web interface |
@@ -355,7 +354,17 @@ The Ares Agent is built with security as a top priority:
 
 **Solution:** Ensure all required flags are provided:
 ```bash
-docker run --user root --privileged --device /dev/net/tun:/dev/net/tun -e ARES_RUN_AS_ROOT=true ...
+docker run -d \
+  --name ares-agent \
+  --user root \
+  --privileged \
+  -p 8443:8443 \
+  -v ares-agent-data:/data \
+  -v /lib/modules:/lib/modules:ro \
+  --device /dev/net/tun:/dev/net/tun \
+  --entrypoint /bin/sh \
+  assailai/ares-agent:latest \
+  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
 ```
 
 ### Can't Access Web Interface
@@ -402,20 +411,20 @@ We use [Semantic Versioning](https://semver.org/). For available versions, see t
 
 ## Support
 
-- **Documentation**: [https://docs.assail.ai](https://docs.assail.ai)
-- **Email**: support@assail.ai
+- **Documentation**: [https://www.assailai.com](https://www.assailai.com)
+- **Email**: support@assailai.com
 - **Issues**: [GitHub Issues](https://github.com/assailai/ares-agent/issues)
 
 ### Reporting Security Vulnerabilities
 
-If you discover a security vulnerability, please email security@assail.ai instead of opening a public issue. We take security seriously and will respond promptly.
+If you discover a security vulnerability, please email security@assailai.com instead of opening a public issue. We take security seriously and will respond promptly.
 
 ## License
 
-This software is proprietary and provided under the [Assail AI Terms of Service](https://assail.ai/terms). Use of this agent requires an active Ares subscription.
+This software is proprietary and provided under the [Assail, Inc. Terms of Service](https://www.assailai.com/terms). Use of this agent requires an active Ares subscription.
 
 See [LICENSE](LICENSE) for details.
 
 ---
 
-Copyright 2025 Assail AI. All rights reserved.
+Copyright 2025 Assail, Inc. All rights reserved.
