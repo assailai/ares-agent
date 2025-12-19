@@ -187,12 +187,17 @@ async def setup_step5(
     if not is_valid:
         return RedirectResponse(url=f"/setup?step=5&error={error_msg.replace(' ', '+')}", status_code=302)
 
-    # Update password
+    # Update password - MUST check return value!
     from agent.security.session import update_admin_password
     new_hash = hash_password(new_password)
-    update_admin_password(new_hash, must_change=False)
+    if not update_admin_password(new_hash, must_change=False):
+        # Password update failed - do NOT clear initial password
+        return RedirectResponse(
+            url="/setup?step=5&error=Failed+to+update+password.+Please+try+again.",
+            status_code=302
+        )
 
-    # Clear the initial password from config (no longer valid)
+    # Only clear the initial password AFTER successful update
     set_config(AgentConfig.INITIAL_PASSWORD, "")
 
     add_audit_log(AuditLog.ACTION_PASSWORD_CHANGED, ip_address=get_client_ip(request))

@@ -137,17 +137,29 @@ def update_admin_password(new_password_hash: str, must_change: bool = False) -> 
     try:
         admin = db.query(AdminUser).first()
         if admin:
+            old_hash_preview = admin.password_hash[:20] + "..." if admin.password_hash else "None"
+            new_hash_preview = new_password_hash[:20] + "..." if new_password_hash else "None"
+            logger.info(f"Updating password hash from {old_hash_preview} to {new_hash_preview}")
+
             admin.password_hash = new_password_hash
             admin.must_change_password = must_change
             admin.updated_at = datetime.utcnow()
             db.commit()
-            logger.info("Admin password updated successfully")
-            return True
+
+            # Verify the update was persisted by re-reading from database
+            db.expire_all()  # Clear any cached data
+            verify_admin = db.query(AdminUser).first()
+            if verify_admin and verify_admin.password_hash == new_password_hash:
+                logger.info("Admin password updated and verified successfully")
+                return True
+            else:
+                logger.error("Password update verification failed - hash mismatch after commit")
+                return False
         else:
             logger.error("Cannot update password: no admin user found in database")
             return False
     except Exception as e:
-        logger.error(f"Failed to update admin password: {e}")
+        logger.error(f"Failed to update admin password: {e}", exc_info=True)
         db.rollback()
         return False
     finally:

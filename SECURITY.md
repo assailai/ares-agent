@@ -14,7 +14,7 @@ We take the security of the Ares Agent seriously. If you discover a security vul
 
 **Please do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email us at: **security@assail.ai**
+Instead, please email us at: **security@assailai.com**
 
 Include the following information:
 - Type of vulnerability (e.g., authentication bypass, injection, etc.)
