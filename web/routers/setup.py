@@ -16,7 +16,7 @@ from agent.database.models import (
     AuditLog,
     AgentConfig
 )
-from agent.security.session import validate_session, get_admin_user
+from agent.security.session import validate_session, get_admin_user, update_admin_password
 from agent.security.password import validate_password_strength, hash_password, get_password_requirements
 from agent.registration.client import register_with_platform
 from agent.wireguard.keys import get_or_create_keypair
@@ -188,7 +188,6 @@ async def setup_step5(
         return RedirectResponse(url=f"/setup?step=5&error={error_msg.replace(' ', '+')}", status_code=302)
 
     # Update password - MUST check return value!
-    from agent.security.session import update_admin_password
     new_hash = hash_password(new_password)
     if not update_admin_password(new_hash, must_change=False):
         # Password update failed - do NOT clear initial password

@@ -104,7 +104,22 @@ def get_admin_user() -> Optional[AdminUser]:
     """Get the admin user (there's only one)"""
     db = get_db_session()
     try:
-        return db.query(AdminUser).first()
+        admin = db.query(AdminUser).first()
+        if admin:
+            # Force load all attributes before closing session to prevent
+            # detached object issues with StaticPool. Access each attribute
+            # to ensure they're in the object's __dict__ before detaching.
+            _ = admin.id
+            _ = admin.password_hash
+            _ = admin.must_change_password
+            _ = admin.last_login
+            _ = admin.failed_attempts
+            _ = admin.locked_until
+            _ = admin.created_at
+            _ = admin.updated_at
+            # Explicitly detach from session before closing
+            db.expunge(admin)
+        return admin
     finally:
         db.close()
 
