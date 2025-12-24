@@ -76,13 +76,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Update Docker Hub Description
-        if: github.event_name != 'pull_request'
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: assailai/ares-agent
-          readme-filepath: ./README.md
-          short-description: "Ares Agent - Secure Docker agent for internal API security scanning"
