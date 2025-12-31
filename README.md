@@ -51,31 +51,25 @@ The Ares Agent establishes a secure WireGuard VPN tunnel from your internal netw
 # Using Docker Hub
 docker run -d \
   --name ares-agent \
-  --user root \
-  --privileged \
+  --cap-add=NET_ADMIN \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  --entrypoint /bin/sh \
-  assailai/ares-agent:latest \
-  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
+  --restart unless-stopped \
+  assailai/ares-agent:latest
 
 # Or using GitHub Container Registry
 docker run -d \
   --name ares-agent \
-  --user root \
-  --privileged \
+  --cap-add=NET_ADMIN \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  --entrypoint /bin/sh \
-  ghcr.io/assailai/ares-agent:latest \
-  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
+  --restart unless-stopped \
+  ghcr.io/assailai/ares-agent:latest
 ```
 
-> **Note:** The `--privileged` flag and `--user root` are required for WireGuard VPN to function properly. The custom entrypoint enables IP forwarding and starts the agent directly.
+> **Note:** This agent uses **wireguard-go** (userspace WireGuard) - no host kernel WireGuard module required. The `--cap-add=NET_ADMIN` capability is needed for network interface creation.
 
 ### Get Initial Password
 
@@ -108,13 +102,14 @@ You'll see output like:
 | Requirement | Details |
 |-------------|---------|
 | **Docker** | Version 20.10 or later |
-| **Privileges** | `--privileged` and `--user root` (required for WireGuard VPN) |
+| **Capability** | `--cap-add=NET_ADMIN` (for network interface creation) |
 | **TUN Device** | `--device /dev/net/tun:/dev/net/tun` |
-| **Kernel Modules** | `-v /lib/modules:/lib/modules:ro` (for WireGuard kernel module) |
 | **Outbound UDP** | Port 51820 to Ares platform (WireGuard) |
 | **Outbound TCP** | Port 443 to Ares platform (Registration) |
 | **Memory** | Minimum 256MB |
 | **Disk** | Minimum 100MB for data volume |
+
+> **No host WireGuard installation required** - The agent includes wireguard-go (userspace WireGuard implementation).
 
 ## Installation
 
@@ -123,16 +118,12 @@ You'll see output like:
 ```bash
 docker run -d \
   --name ares-agent \
-  --user root \
-  --privileged \
+  --cap-add=NET_ADMIN \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
   --restart unless-stopped \
-  --entrypoint /bin/sh \
-  assailai/ares-agent:latest \
-  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
+  assailai/ares-agent:latest
 ```
 
 ### Docker Compose
@@ -146,15 +137,12 @@ services:
   ares-agent:
     image: assailai/ares-agent:latest
     container_name: ares-agent
-    user: root
-    privileged: true
-    entrypoint: /bin/sh
-    command: -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
+    cap_add:
+      - NET_ADMIN
     ports:
       - "8443:8443"
     volumes:
       - ares-agent-data:/data
-      - /lib/modules:/lib/modules:ro
     devices:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
@@ -197,20 +185,18 @@ spec:
       containers:
       - name: ares-agent
         image: assailai/ares-agent:latest
-        command: ["/bin/sh"]
-        args: ["-c", "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"]
         ports:
         - containerPort: 8443
           name: https
         volumeMounts:
         - name: data
           mountPath: /data
-        - name: lib-modules
-          mountPath: /lib/modules
-          readOnly: true
+        - name: tun
+          mountPath: /dev/net/tun
         securityContext:
-          privileged: true
-          runAsUser: 0
+          capabilities:
+            add:
+              - NET_ADMIN
         resources:
           requests:
             memory: "256Mi"
@@ -236,10 +222,10 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: ares-agent-pvc
-      - name: lib-modules
+      - name: tun
         hostPath:
-          path: /lib/modules
-          type: Directory
+          path: /dev/net/tun
+          type: CharDevice
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -319,10 +305,11 @@ spec:
 The Ares Agent is built with security as a top priority:
 
 ### Container Security
-- **Privileged mode required** - WireGuard VPN requires root and privileged mode for kernel module access
+- **No privileged mode** - Uses wireguard-go (userspace) with only `NET_ADMIN` capability
 - **Minimal attack surface** - Multi-stage build with only runtime dependencies
 - **No secrets in image** - All credentials provided at runtime
 - **Isolated networking** - WireGuard creates an isolated overlay network
+- **No host dependencies** - No kernel modules or host WireGuard installation required
 
 ### Authentication & Sessions
 - **bcrypt password hashing** - Cost factor 12
@@ -356,15 +343,12 @@ The Ares Agent is built with security as a top priority:
 ```bash
 docker run -d \
   --name ares-agent \
-  --user root \
-  --privileged \
+  --cap-add=NET_ADMIN \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  --entrypoint /bin/sh \
-  assailai/ares-agent:latest \
-  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
+  --restart unless-stopped \
+  assailai/ares-agent:latest
 ```
 
 ### Can't Access Web Interface
@@ -385,25 +369,21 @@ docker run -d \
 
 ### Forgot Password / Complete Reinstall
 
-If you forgot your password, need to re-register with a new token, or encounter any issues, perform a complete reinstall:
+If you forgot your password, need to re-register with a new token, or encounter any issues, perform a complete reinstall with this single command:
 
 ```bash
-# Remove existing container and data
-docker rm -f ares-agent
-docker volume rm ares-agent-data
-
-# Fresh install
+# Stop, remove, and reinstall in one command
+docker rm -f ares-agent; \
+docker volume rm ares-agent-data; \
+docker pull assailai/ares-agent:latest && \
 docker run -d \
   --name ares-agent \
-  --user root \
-  --privileged \
+  --cap-add=NET_ADMIN \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  -v /lib/modules:/lib/modules:ro \
   --device /dev/net/tun:/dev/net/tun \
-  --entrypoint /bin/sh \
-  assailai/ares-agent:latest \
-  -c "cd /app && echo 1 > /proc/sys/net/ipv4/ip_forward && python -u -m agent.startup && exec python -u -m agent.main"
+  --restart unless-stopped \
+  assailai/ares-agent:latest
 ```
 
 Then get the new initial password with `docker logs ares-agent` and complete the setup wizard.
@@ -421,7 +401,8 @@ We use [Semantic Versioning](https://semver.org/). For available versions, see t
 
 | Version | Status | Notes |
 |---------|--------|-------|
-| 1.1.x | Current | WireGuard fixes, requires privileged mode |
+| 2.0.x | Current | Uses wireguard-go - no privileged mode or kernel module required |
+| 1.1.x | Legacy | Requires privileged mode and host kernel WireGuard |
 | 1.0.x | Legacy | May have WireGuard connectivity issues |
 
 ## Support

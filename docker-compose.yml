@@ -19,6 +19,8 @@ services:
       - "8443:8443"
     volumes:
       - ares-agent-data:/data
+    devices:
+      - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
     sysctls:
@@ -29,11 +31,11 @@ services:
       - DATA_DIR=/data
       - LOG_LEVEL=INFO
     healthcheck:
-      test: ["CMD", "curl", "-fsk", "https://localhost:8443/health"]
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://localhost:8443/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
 volumes:
   ares-agent-data:
