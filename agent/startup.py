@@ -108,6 +108,9 @@ def initialize_agent():
 def print_startup_banner(container_ip: str, host_ip: str | None, port: int, initial_password: str = None):
     """Print the startup banner with connection information"""
 
+    # Determine the best IP to display
+    display_ip = host_ip if host_ip else container_ip
+
     banner = f"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                    ║
@@ -122,7 +125,10 @@ def print_startup_banner(container_ip: str, host_ip: str | None, port: int, init
 ║                                                                                    ║
 ╠════════════════════════════════════════════════════════════════════════════════════╣
 ║                                                                                    ║
-║  Web Interface:  https://{container_ip}:{port:<47}  ║
+║  Web Interface:  https://{display_ip}:{port:<47}  ║
+║                                                                                    ║
+║  NOTE: If accessing from another machine, use the host's physical IP address      ║
+║        (e.g., run 'ip addr' or 'hostname -I' on the host to find it)              ║
 ║                                                                                    ║"""
 
     if initial_password:
