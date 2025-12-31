@@ -45,11 +45,13 @@ if [ "$CURRENT_UID" = "0" ]; then
     fi
 
     # Enable IP forwarding (required for WireGuard routing)
-    if [ -w /proc/sys/net/ipv4/ip_forward ]; then
-        echo 1 > /proc/sys/net/ipv4/ip_forward
+    # Note: The -w check may pass even if /proc is mounted read-only, so we try the write and catch errors
+    if echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null; then
         log_info "IP forwarding enabled"
     else
-        log_warn "Cannot enable IP forwarding (read-only /proc). WireGuard routing may not work."
+        log_warn "Cannot enable IP forwarding (read-only /proc or sysctl restriction)."
+        log_warn "WireGuard routing to internal networks may not work."
+        log_warn "To fix: run container with --sysctl net.ipv4.ip_forward=1"
     fi
 
     # =============================================================================
