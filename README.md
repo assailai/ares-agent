@@ -53,6 +53,7 @@ docker run -d --name ares-agent \
   --user root \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv4.ip_forward=1 \
   -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
@@ -64,6 +65,7 @@ docker run -d --name ares-agent \
   --user root \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv4.ip_forward=1 \
   -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
@@ -75,6 +77,7 @@ docker run -d --name ares-agent \
 > - `--user root` - WireGuard needs root to create network interfaces
 > - `--cap-add=NET_ADMIN` - Required capability for network interface management
 > - `--device /dev/net/tun` - TUN device for WireGuard userspace implementation
+> - `--sysctl net.ipv4.ip_forward=1` - Enable IP forwarding for routing to internal networks
 > - `-e ARES_RUN_AS_ROOT=true` - Tells entrypoint to keep running as root
 
 ### Get Initial Password
@@ -111,6 +114,7 @@ You'll see output like:
 | **Root User** | `--user root` (required for WireGuard VPN) |
 | **NET_ADMIN** | `--cap-add=NET_ADMIN` (required for network interface creation) |
 | **TUN Device** | `--device /dev/net/tun:/dev/net/tun` |
+| **IP Forwarding** | `--sysctl net.ipv4.ip_forward=1` (required for routing to internal networks) |
 | **Environment** | `-e ARES_RUN_AS_ROOT=true` (keeps agent running as root) |
 | **Outbound UDP** | Port 51820 to Ares platform (WireGuard) |
 | **Outbound TCP** | Port 443 to Ares platform (Registration) |
@@ -128,6 +132,7 @@ docker run -d --name ares-agent \
   --user root \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv4.ip_forward=1 \
   -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
@@ -151,6 +156,8 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
     environment:
       - ARES_RUN_AS_ROOT=true
     ports:
@@ -362,6 +369,7 @@ docker run -d --name ares-agent \
   --user root \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv4.ip_forward=1 \
   -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
@@ -380,6 +388,7 @@ docker run -d --name ares-agent \
 | Not running as root | Add `--user root` flag |
 | Missing NET_ADMIN capability | Add `--cap-add=NET_ADMIN` flag |
 | Missing TUN device | Add `--device /dev/net/tun:/dev/net/tun` flag |
+| Missing IP forwarding | Add `--sysctl net.ipv4.ip_forward=1` flag |
 | Missing environment variable | Add `-e ARES_RUN_AS_ROOT=true` flag |
 
 The agent now performs pre-flight checks and will log specific errors indicating which flag is missing.
@@ -413,6 +422,7 @@ docker run -d --name ares-agent \
   --user root \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv4.ip_forward=1 \
   -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
@@ -435,6 +445,7 @@ docker run -d --name ares-agent \
   --user root \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv4.ip_forward=1 \
   -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \

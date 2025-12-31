@@ -16,6 +16,7 @@
 #     --user root \
 #     --cap-add=NET_ADMIN \
 #     --device /dev/net/tun:/dev/net/tun \
+#     --sysctl net.ipv4.ip_forward=1 \
 #     -e ARES_RUN_AS_ROOT=true \
 #     -p 8443:8443 \
 #     -v ares-agent-data:/data \
@@ -23,10 +24,11 @@
 #     assailai/ares-agent:latest
 #
 # IMPORTANT: The following flags are REQUIRED for WireGuard:
-#   --user root              : WireGuard needs root to create network interfaces
-#   --cap-add=NET_ADMIN      : Required capability for network interface management
-#   --device /dev/net/tun    : TUN device for WireGuard userspace implementation
-#   -e ARES_RUN_AS_ROOT=true : Tells entrypoint to keep running as root
+#   --user root                      : WireGuard needs root to create network interfaces
+#   --cap-add=NET_ADMIN              : Required capability for network interface management
+#   --device /dev/net/tun            : TUN device for WireGuard userspace implementation
+#   --sysctl net.ipv4.ip_forward=1   : Enable IP forwarding for routing to internal networks
+#   -e ARES_RUN_AS_ROOT=true         : Tells entrypoint to keep running as root
 #
 # =============================================================================
 
