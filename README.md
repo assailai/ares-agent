@@ -49,27 +49,33 @@ The Ares Agent establishes a secure WireGuard VPN tunnel from your internal netw
 
 ```bash
 # Using Docker Hub
-docker run -d \
-  --name ares-agent \
+docker run -d --name ares-agent \
+  --user root \
   --cap-add=NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --device /dev/net/tun:/dev/net/tun \
   --restart unless-stopped \
   assailai/ares-agent:latest
 
 # Or using GitHub Container Registry
-docker run -d \
-  --name ares-agent \
+docker run -d --name ares-agent \
+  --user root \
   --cap-add=NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --device /dev/net/tun:/dev/net/tun \
   --restart unless-stopped \
   ghcr.io/assailai/ares-agent:latest
 ```
 
-> **Note:** This agent uses **wireguard-go** (userspace WireGuard) - no host kernel WireGuard module required. The `--cap-add=NET_ADMIN` capability is needed for network interface creation.
+> **Note:** The flags above are **required** for WireGuard VPN to function:
+> - `--user root` - WireGuard needs root to create network interfaces
+> - `--cap-add=NET_ADMIN` - Required capability for network interface management
+> - `--device /dev/net/tun` - TUN device for WireGuard userspace implementation
+> - `-e ARES_RUN_AS_ROOT=true` - Tells entrypoint to keep running as root
 
 ### Get Initial Password
 
@@ -102,8 +108,10 @@ You'll see output like:
 | Requirement | Details |
 |-------------|---------|
 | **Docker** | Version 20.10 or later |
-| **Capability** | `--cap-add=NET_ADMIN` (for network interface creation) |
+| **Root User** | `--user root` (required for WireGuard VPN) |
+| **NET_ADMIN** | `--cap-add=NET_ADMIN` (required for network interface creation) |
 | **TUN Device** | `--device /dev/net/tun:/dev/net/tun` |
+| **Environment** | `-e ARES_RUN_AS_ROOT=true` (keeps agent running as root) |
 | **Outbound UDP** | Port 51820 to Ares platform (WireGuard) |
 | **Outbound TCP** | Port 443 to Ares platform (Registration) |
 | **Memory** | Minimum 256MB |
@@ -116,12 +124,13 @@ You'll see output like:
 ### Docker Run
 
 ```bash
-docker run -d \
-  --name ares-agent \
+docker run -d --name ares-agent \
+  --user root \
   --cap-add=NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --device /dev/net/tun:/dev/net/tun \
   --restart unless-stopped \
   assailai/ares-agent:latest
 ```
@@ -137,14 +146,17 @@ services:
   ares-agent:
     image: assailai/ares-agent:latest
     container_name: ares-agent
+    user: root
     cap_add:
       - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - ARES_RUN_AS_ROOT=true
     ports:
       - "8443:8443"
     volumes:
       - ares-agent-data:/data
-    devices:
-      - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://localhost:8443/health"]
@@ -185,18 +197,22 @@ spec:
       containers:
       - name: ares-agent
         image: assailai/ares-agent:latest
+        env:
+        - name: ARES_RUN_AS_ROOT
+          value: "true"
         ports:
         - containerPort: 8443
           name: https
         volumeMounts:
         - name: data
           mountPath: /data
-        - name: tun
+        - name: tun-device
           mountPath: /dev/net/tun
         securityContext:
+          runAsUser: 0
           capabilities:
             add:
-              - NET_ADMIN
+            - NET_ADMIN
         resources:
           requests:
             memory: "256Mi"
@@ -222,7 +238,7 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: ares-agent-pvc
-      - name: tun
+      - name: tun-device
         hostPath:
           path: /dev/net/tun
           type: CharDevice
@@ -305,11 +321,12 @@ spec:
 The Ares Agent is built with security as a top priority:
 
 ### Container Security
-- **No privileged mode** - Uses wireguard-go (userspace) with only `NET_ADMIN` capability
+- **Root + NET_ADMIN required** - WireGuard VPN requires root and NET_ADMIN capability for network interface management
+- **Userspace WireGuard** - Uses wireguard-go, no kernel module required
 - **Minimal attack surface** - Multi-stage build with only runtime dependencies
 - **No secrets in image** - All credentials provided at runtime
 - **Isolated networking** - WireGuard creates an isolated overlay network
-- **No host dependencies** - No kernel modules or host WireGuard installation required
+- **Auto-recovery** - Automatically attempts to restore tunnel if it goes down
 
 ### Authentication & Sessions
 - **bcrypt password hashing** - Cost factor 12
@@ -341,15 +358,31 @@ The Ares Agent is built with security as a top priority:
 
 **Solution:** Ensure all required flags are provided:
 ```bash
-docker run -d \
-  --name ares-agent \
+docker run -d --name ares-agent \
+  --user root \
   --cap-add=NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --device /dev/net/tun:/dev/net/tun \
   --restart unless-stopped \
   assailai/ares-agent:latest
 ```
+
+### WireGuard Tunnel Failed to Start
+
+**Symptom:** Error message "Failed to start WireGuard tunnel"
+
+**Common causes and solutions:**
+
+| Cause | Solution |
+|-------|----------|
+| Not running as root | Add `--user root` flag |
+| Missing NET_ADMIN capability | Add `--cap-add=NET_ADMIN` flag |
+| Missing TUN device | Add `--device /dev/net/tun:/dev/net/tun` flag |
+| Missing environment variable | Add `-e ARES_RUN_AS_ROOT=true` flag |
+
+The agent now performs pre-flight checks and will log specific errors indicating which flag is missing.
 
 ### Can't Access Web Interface
 
@@ -367,26 +400,47 @@ docker run -d \
 3. Verify platform URL is correct
 4. Check agent logs in web interface (Dashboard > Logs)
 
-### Forgot Password / Complete Reinstall
+### Remove and Reinstall (Complete Reset)
 
-If you forgot your password, need to re-register with a new token, or encounter any issues, perform a complete reinstall with this single command:
+Use this when you forgot your password, need to re-register with a new token, or encounter any issues:
 
 ```bash
-# Stop, remove, and reinstall in one command
+# One-liner: Stop, remove container and data, pull latest, and run
 docker rm -f ares-agent; \
 docker volume rm ares-agent-data; \
 docker pull assailai/ares-agent:latest && \
-docker run -d \
-  --name ares-agent \
+docker run -d --name ares-agent \
+  --user root \
   --cap-add=NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
   -p 8443:8443 \
   -v ares-agent-data:/data \
-  --device /dev/net/tun:/dev/net/tun \
   --restart unless-stopped \
   assailai/ares-agent:latest
 ```
 
-Then get the new initial password with `docker logs ares-agent` and complete the setup wizard.
+Then get the new initial password:
+```bash
+docker logs ares-agent
+```
+
+### Update to Latest Version
+
+```bash
+# Pull latest image and recreate container (preserves data)
+docker pull assailai/ares-agent:latest && \
+docker rm -f ares-agent && \
+docker run -d --name ares-agent \
+  --user root \
+  --cap-add=NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  -e ARES_RUN_AS_ROOT=true \
+  -p 8443:8443 \
+  -v ares-agent-data:/data \
+  --restart unless-stopped \
+  assailai/ares-agent:latest
+```
 
 ### Health Check Failing
 
@@ -401,8 +455,8 @@ We use [Semantic Versioning](https://semver.org/). For available versions, see t
 
 | Version | Status | Notes |
 |---------|--------|-------|
-| 2.0.x | Current | Uses wireguard-go - no privileged mode or kernel module required |
-| 1.1.x | Legacy | Requires privileged mode and host kernel WireGuard |
+| 2.0.x | Current | Improved WireGuard diagnostics, pre-flight checks, auto-recovery, simplified docker run |
+| 1.1.x | Legacy | WireGuard fixes, required privileged mode |
 | 1.0.x | Legacy | May have WireGuard connectivity issues |
 
 ## Support

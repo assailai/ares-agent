@@ -86,7 +86,23 @@ else
     # Running as non-root (default, Docker Scout compliant)
     # =============================================================================
     log_info "Running as non-root user (UID: $CURRENT_UID) - Docker Scout compliant mode"
-    log_warn "WireGuard VPN requires root. For full functionality, run with: docker run --user root --cap-add NET_ADMIN ..."
+    log_error "============================================================"
+    log_error "WARNING: WireGuard VPN will NOT function without root permissions!"
+    log_error "============================================================"
+    log_error "To enable WireGuard VPN, restart the container with:"
+    log_error ""
+    log_error "  docker rm -f ares-agent"
+    log_error "  docker run -d --name ares-agent \\"
+    log_error "    --user root \\"
+    log_error "    --cap-add=NET_ADMIN \\"
+    log_error "    --device /dev/net/tun:/dev/net/tun \\"
+    log_error "    -e ARES_RUN_AS_ROOT=true \\"
+    log_error "    -p 8443:8443 \\"
+    log_error "    -v ares-agent-data:/data \\"
+    log_error "    --restart unless-stopped \\"
+    log_error "    assailai/ares-agent:latest"
+    log_error ""
+    log_error "============================================================"
 
     # Change to app directory
     cd /app

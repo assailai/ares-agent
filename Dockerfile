@@ -11,16 +11,22 @@
 #   - Read-only root filesystem compatible
 #   - Distroless-inspired minimal surface
 #
-# Usage:
+# Usage (REQUIRED for WireGuard VPN to function):
 #   docker run -d --name ares-agent \
 #     --user root \
-#     --privileged \
-#     -p 8443:8443 \
-#     -v ares-agent-data:/data \
-#     -v /lib/modules:/lib/modules:ro \
+#     --cap-add=NET_ADMIN \
 #     --device /dev/net/tun:/dev/net/tun \
 #     -e ARES_RUN_AS_ROOT=true \
+#     -p 8443:8443 \
+#     -v ares-agent-data:/data \
+#     --restart unless-stopped \
 #     assailai/ares-agent:latest
+#
+# IMPORTANT: The following flags are REQUIRED for WireGuard:
+#   --user root              : WireGuard needs root to create network interfaces
+#   --cap-add=NET_ADMIN      : Required capability for network interface management
+#   --device /dev/net/tun    : TUN device for WireGuard userspace implementation
+#   -e ARES_RUN_AS_ROOT=true : Tells entrypoint to keep running as root
 #
 # =============================================================================
 
@@ -75,7 +81,7 @@ FROM python:3.12-alpine
 # Security labels
 LABEL maintainer="Assail AI <support@assail.ai>"
 LABEL description="Ares Docker Agent - Secure agent for internal API scanning"
-LABEL version="2.0.0"
+LABEL version="1.1.2"
 LABEL org.opencontainers.image.source="https://github.com/assailai/ares-agent"
 LABEL org.opencontainers.image.licenses="Proprietary"
 LABEL org.opencontainers.image.vendor="Assail AI"

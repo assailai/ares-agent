@@ -6,9 +6,10 @@ import asyncio
 import subprocess
 import os
 import re
+import stat
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
 from agent.config import settings
@@ -22,6 +23,10 @@ from agent.wireguard.config_gen import generate_and_write_config, config_exists
 
 logger = logging.getLogger(__name__)
 
+# Constants for retry logic
+MAX_RETRIES = 3
+RETRY_DELAYS = [1, 2, 5]  # Exponential backoff in seconds
+
 
 class WireGuardManager:
     """Manager for WireGuard tunnel using wireguard-go"""
@@ -32,6 +37,272 @@ class WireGuardManager:
         self._process: Optional[subprocess.Popen] = None
         self._monitor_task: Optional[asyncio.Task] = None
         self._running = False
+
+    def _check_tun_device(self) -> Tuple[bool, str]:
+        """
+        Check if /dev/net/tun exists and is accessible.
+        Returns (success, error_message).
+        """
+        tun_path = "/dev/net/tun"
+
+        # Check if device exists
+        if not os.path.exists(tun_path):
+            return False, (
+                f"TUN device {tun_path} not found. "
+                "Run container with: --device /dev/net/tun:/dev/net/tun"
+            )
+
+        # Check if it's a character device
+        try:
+            mode = os.stat(tun_path).st_mode
+            if not stat.S_ISCHR(mode):
+                return False, f"{tun_path} exists but is not a character device"
+        except OSError as e:
+            return False, f"Cannot stat {tun_path}: {e}"
+
+        # Check read/write access
+        if not os.access(tun_path, os.R_OK | os.W_OK):
+            return False, (
+                f"Cannot read/write {tun_path}. "
+                "Ensure container runs as root or with --privileged flag"
+            )
+
+        return True, ""
+
+    def _check_root_permissions(self) -> Tuple[bool, str]:
+        """
+        Check if running with sufficient permissions for WireGuard.
+        Returns (success, error_message).
+        """
+        if os.geteuid() != 0:
+            return False, (
+                "WireGuard requires root permissions. "
+                "Run container with: --user root -e ARES_RUN_AS_ROOT=true"
+            )
+        return True, ""
+
+    def _check_net_admin_capability(self) -> Tuple[bool, str]:
+        """
+        Check if NET_ADMIN capability is available.
+        Returns (success, error_message).
+        """
+        # Try to create a dummy interface to test NET_ADMIN
+        result = subprocess.run(
+            ["ip", "link", "add", "ares_test", "type", "dummy"],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0:
+            # Cleanup test interface
+            subprocess.run(
+                ["ip", "link", "del", "ares_test"],
+                capture_output=True
+            )
+            return True, ""
+
+        if "Operation not permitted" in result.stderr:
+            return False, (
+                "NET_ADMIN capability not available. "
+                "Run container with: --cap-add=NET_ADMIN"
+            )
+
+        # Some other error, but might still work
+        return True, ""
+
+    def _check_wireguard_go_binary(self) -> Tuple[bool, str]:
+        """
+        Check if wireguard-go binary is available and executable.
+        Returns (success, error_message).
+        """
+        result = subprocess.run(
+            ["which", "wireguard-go"],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            return False, "wireguard-go binary not found in PATH"
+
+        wg_path = result.stdout.strip()
+        if not os.access(wg_path, os.X_OK):
+            return False, f"wireguard-go at {wg_path} is not executable"
+
+        return True, ""
+
+    def run_preflight_checks(self) -> Tuple[bool, List[str]]:
+        """
+        Run all pre-flight checks before starting WireGuard.
+        Returns (all_passed, list_of_errors).
+        """
+        errors = []
+
+        # Check wireguard-go binary
+        ok, err = self._check_wireguard_go_binary()
+        if not ok:
+            errors.append(err)
+
+        # Check root permissions
+        ok, err = self._check_root_permissions()
+        if not ok:
+            errors.append(err)
+
+        # Check TUN device
+        ok, err = self._check_tun_device()
+        if not ok:
+            errors.append(err)
+
+        # Check NET_ADMIN capability (only if root)
+        if os.geteuid() == 0:
+            ok, err = self._check_net_admin_capability()
+            if not ok:
+                errors.append(err)
+
+        if errors:
+            logger.error("WireGuard pre-flight checks failed:")
+            for i, error in enumerate(errors, 1):
+                logger.error(f"  {i}. {error}")
+
+            # Log the recommended docker run command
+            logger.error("")
+            logger.error("Recommended docker run command:")
+            logger.error("  docker run -d --name ares-agent \\")
+            logger.error("    --user root \\")
+            logger.error("    --cap-add=NET_ADMIN \\")
+            logger.error("    --device /dev/net/tun:/dev/net/tun \\")
+            logger.error("    -e ARES_RUN_AS_ROOT=true \\")
+            logger.error("    -p 8443:8443 \\")
+            logger.error("    -v ares-agent-data:/data \\")
+            logger.error("    --restart unless-stopped \\")
+            logger.error("    assailai/ares-agent:latest")
+
+        return len(errors) == 0, errors
+
+    async def _start_wireguard_go_with_retry(self) -> Tuple[bool, str]:
+        """
+        Start wireguard-go with retry logic and detailed error capture.
+        Returns (success, error_message).
+        """
+        for attempt in range(MAX_RETRIES):
+            if attempt > 0:
+                delay = RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)]
+                logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES} after {delay}s delay...")
+                await asyncio.sleep(delay)
+
+            # Create environment with flags
+            wg_env = os.environ.copy()
+            wg_env["WG_PROCESS_FOREGROUND"] = "1"
+
+            logger.info(f"Starting wireguard-go (attempt {attempt + 1}/{MAX_RETRIES})")
+
+            try:
+                self._process = subprocess.Popen(
+                    ["wireguard-go", "-f", self.interface],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=wg_env
+                )
+            except FileNotFoundError:
+                return False, "wireguard-go binary not found"
+            except PermissionError:
+                return False, "Permission denied executing wireguard-go"
+            except Exception as e:
+                return False, f"Failed to spawn wireguard-go: {e}"
+
+            # Wait for interface to come up (with progressive checks)
+            for i in range(20):  # Up to 2 seconds
+                await asyncio.sleep(0.1)
+
+                # Check if process exited
+                exit_code = self._process.poll()
+                if exit_code is not None:
+                    # Process exited - capture stderr
+                    stderr = ""
+                    if self._process.stderr:
+                        try:
+                            stderr = self._process.stderr.read().decode().strip()
+                        except Exception:
+                            pass
+
+                    error_msg = self._diagnose_wireguard_failure(exit_code, stderr)
+                    logger.warning(f"wireguard-go exited with code {exit_code}: {error_msg}")
+                    break
+
+                # Check if interface was created
+                if self._interface_exists(self.interface):
+                    logger.info(f"WireGuard interface {self.interface} created successfully")
+                    return True, ""
+            else:
+                # Loop completed without break - process running but no interface
+                # Give it one more second
+                await asyncio.sleep(1)
+                if self._interface_exists(self.interface):
+                    logger.info(f"WireGuard interface {self.interface} created successfully")
+                    return True, ""
+
+                # Process running but no interface - this is unusual
+                if self._process.poll() is None:
+                    self._process.terminate()
+                    try:
+                        self._process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self._process.kill()
+
+                stderr = ""
+                if self._process.stderr:
+                    try:
+                        stderr = self._process.stderr.read().decode().strip()
+                    except Exception:
+                        pass
+
+                error_msg = f"wireguard-go running but interface not created. Stderr: {stderr or '(empty)'}"
+                logger.warning(error_msg)
+
+        # All retries exhausted
+        return False, f"Failed after {MAX_RETRIES} attempts. Last error: {error_msg if 'error_msg' in locals() else 'unknown'}"
+
+    def _diagnose_wireguard_failure(self, exit_code: int, stderr: str) -> str:
+        """
+        Provide a human-readable diagnosis for wireguard-go failure.
+        """
+        stderr_lower = stderr.lower() if stderr else ""
+
+        # Check for common failure patterns
+        if "permission denied" in stderr_lower or "operation not permitted" in stderr_lower:
+            return (
+                "Permission denied. Ensure container has: "
+                "--user root --cap-add=NET_ADMIN --device /dev/net/tun"
+            )
+
+        if "no such file or directory" in stderr_lower and "tun" in stderr_lower:
+            return "TUN device not available. Run with: --device /dev/net/tun:/dev/net/tun"
+
+        if "address already in use" in stderr_lower:
+            return "WireGuard interface already exists. Try removing stale interface first."
+
+        if "busy" in stderr_lower or "device or resource busy" in stderr_lower:
+            return "Device busy. A previous wireguard-go process may still be running."
+
+        # If stderr is empty, provide common causes
+        if not stderr:
+            if exit_code == 1:
+                return (
+                    "wireguard-go exited silently (code 1). Common causes: "
+                    "1) /dev/net/tun not accessible, "
+                    "2) Not running as root, "
+                    "3) Missing NET_ADMIN capability"
+                )
+            return f"wireguard-go exited with code {exit_code} (no error output)"
+
+        return stderr
+
+    def _interface_exists(self, name: str) -> bool:
+        """Check if a network interface exists."""
+        result = subprocess.run(
+            ["ip", "link", "show", "dev", name],
+            capture_output=True
+        )
+        return result.returncode == 0
 
     async def start(self) -> bool:
         """
@@ -72,27 +343,18 @@ class WireGuardManager:
                 # Kernel module not available, fall back to wireguard-go
                 logger.info(f"Kernel WireGuard not available (error: {result.stderr.strip()}), trying wireguard-go")
 
-                # Create environment with flags to suppress kernel warning and run in foreground
-                # WG_PROCESS_FOREGROUND=1 suppresses the "kernel has first class support" warning
-                wg_env = os.environ.copy()
-                wg_env["WG_PROCESS_FOREGROUND"] = "1"
+                # Run pre-flight checks before attempting wireguard-go
+                preflight_ok, preflight_errors = self.run_preflight_checks()
+                if not preflight_ok:
+                    error_summary = "; ".join(preflight_errors)
+                    self._update_status(connected=False, error=f"Pre-flight failed: {error_summary}")
+                    return False
 
-                logger.info(f"Starting wireguard-go with WG_PROCESS_FOREGROUND=1")
-                self._process = subprocess.Popen(
-                    ["wireguard-go", "-f", self.interface],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=wg_env
-                )
-
-                # Wait a moment for interface to come up
-                await asyncio.sleep(1)
-
-                # Check if process is still running
-                if self._process.poll() is not None:
-                    stderr = self._process.stderr.read().decode() if self._process.stderr else ""
-                    logger.error(f"wireguard-go failed to start: {stderr}")
-                    self._update_status(connected=False, error=f"Failed to start: {stderr}")
+                # Start wireguard-go with retry logic
+                success, error_msg = await self._start_wireguard_go_with_retry()
+                if not success:
+                    logger.error(f"Failed to start wireguard-go: {error_msg}")
+                    self._update_status(connected=False, error=error_msg)
                     return False
             else:
                 logger.info("Using native kernel WireGuard module")
@@ -262,7 +524,11 @@ class WireGuardManager:
         return status
 
     async def _monitor_loop(self):
-        """Background task to monitor tunnel health"""
+        """Background task to monitor tunnel health and auto-recover"""
+        consecutive_failures = 0
+        max_auto_recovery_attempts = 3
+        auto_recovery_cooldown = 60  # seconds between recovery attempts
+
         while self._running:
             try:
                 status = self.get_status()
@@ -274,10 +540,52 @@ class WireGuardManager:
                     error=status.get("error")
                 )
 
-                # Parse and store last handshake
-                if status.get("last_handshake") and status["last_handshake"] != "none":
-                    # Handshake exists, tunnel is healthy
-                    pass
+                # Check tunnel health
+                if status["connected"]:
+                    # Tunnel is healthy, reset failure counter
+                    consecutive_failures = 0
+
+                    # Parse and store last handshake
+                    if status.get("last_handshake") and status["last_handshake"] != "none":
+                        # Handshake exists, tunnel is fully healthy
+                        pass
+                else:
+                    # Tunnel is down - attempt auto-recovery
+                    consecutive_failures += 1
+
+                    if consecutive_failures <= max_auto_recovery_attempts:
+                        logger.warning(
+                            f"Tunnel appears down (attempt {consecutive_failures}/{max_auto_recovery_attempts}). "
+                            f"Attempting auto-recovery..."
+                        )
+
+                        # Wait before attempting recovery
+                        await asyncio.sleep(auto_recovery_cooldown)
+
+                        if not self._running:
+                            break
+
+                        # Attempt to restart
+                        try:
+                            success = await self.restart()
+                            if success:
+                                logger.info("Auto-recovery successful - tunnel restored")
+                                consecutive_failures = 0
+                            else:
+                                logger.error(f"Auto-recovery failed (attempt {consecutive_failures})")
+                        except Exception as recover_err:
+                            logger.error(f"Auto-recovery error: {recover_err}")
+                    else:
+                        logger.error(
+                            f"Auto-recovery exhausted ({max_auto_recovery_attempts} attempts). "
+                            f"Manual intervention required. Check container permissions."
+                        )
+                        # Log the recommended docker run command
+                        logger.error("To fix, restart container with correct permissions:")
+                        logger.error(
+                            "  docker run --user root --cap-add=NET_ADMIN "
+                            "--device /dev/net/tun -e ARES_RUN_AS_ROOT=true ..."
+                        )
 
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")
