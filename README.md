@@ -287,6 +287,31 @@ spec:
 6. **Agent Name** - Give your agent a descriptive name for the dashboard
 7. **Connect** - Establish the WireGuard tunnel
 
+### Restarting the Agent After Configuration Changes
+
+After making changes to agent settings (such as updating internal networks, agent name, or other configuration), you need to restart the agent for changes to take effect.
+
+**Via the Web Interface (Recommended):**
+1. Navigate to **Settings** in the web interface
+2. Click the **Restart Agent** button
+3. Wait for the tunnel to reconnect (usually takes 5-10 seconds)
+
+**Via Docker Command Line:**
+```bash
+# Restart the container (preserves configuration)
+docker restart ares-agent
+
+# View logs to confirm successful restart
+docker logs -f ares-agent
+```
+
+**Via Docker Compose:**
+```bash
+docker-compose restart ares-agent
+```
+
+> **Note:** Restarting the agent will briefly disconnect the WireGuard tunnel. Any in-progress scans will automatically resume once the tunnel is re-established.
+
 ### Environment Variables
 
 | Variable | Default | Description |

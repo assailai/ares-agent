@@ -64,6 +64,15 @@
         </form>
     </div>
 
+    <!-- Restart Agent -->
+    <div class="card">
+        <h2>Restart Agent</h2>
+        <p>After making configuration changes, restart the agent to apply them. This will briefly disconnect the WireGuard tunnel.</p>
+        <form method="POST" action="/tunnel/restart">
+            <button type="submit" class="btn btn-warning">Restart Agent</button>
+        </form>
+    </div>
+
     <!-- Password -->
     <div class="card">
         <h2>Change Password</h2>
