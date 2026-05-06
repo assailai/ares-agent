@@ -106,6 +106,15 @@ See [docker-compose.yml](docker-compose.yml) for the full configuration.
 
 ### Option D: Kubernetes
 
+Verified on EKS 1.29 with the AWS VPC CNI: the pod boots, `/dev/net/tun` is usable with `NET_ADMIN` (no `privileged: true` required), and the web UI serves on port 8443.
+
+> **CNI caveat — `net.ipv4.ip_forward`**
+> WireGuard routing into internal CIDRs needs `net.ipv4.ip_forward=1` in the pod's network namespace. The entrypoint tries to set it but `/proc/sys` is read-only inside the container, so it depends on what the CNI sets:
+> - **AWS VPC CNI (EKS)** — already `1` in the pod netns, so this works out of the box.
+> - **Azure CNI / Calico / Cilium** — may leave it at `0`. WireGuard will route packets to the cluster's CIDRs but not forward them, so internal-network scanning will silently fail.
+>
+> If you're not on EKS, verify with `kubectl exec deploy/ares-agent -- cat /proc/sys/net/ipv4/ip_forward`. If it's `0`, you can't fix it via `securityContext.sysctls` because `net.ipv4.ip_forward` is an unsafe sysctl that most managed kubelets reject (`SysctlForbidden`). The workarounds are: configure the kubelet with `--allowed-unsafe-sysctls=net.ipv4.ip_forward` and add the sysctl to `spec.securityContext.sysctls`, or run a `privileged: true` init container that does `sysctl -w net.ipv4.ip_forward=1`.
+
 <details>
 <summary>Click to expand Kubernetes manifests</summary>
 
@@ -199,6 +208,21 @@ spec:
     name: https
   type: ClusterIP
 ```
+
+Apply the manifests, fetch the initial password, then port-forward to reach the UI:
+
+```bash
+kubectl apply -f ares-agent.yaml
+
+# Get the initial password
+kubectl logs deploy/ares-agent | grep "Initial Password"
+
+# Open the web interface
+kubectl port-forward svc/ares-agent 8443:8443
+# Then open https://localhost:8443
+```
+
+For permanent external access, replace the port-forward with an Ingress or a `LoadBalancer`-type Service in front of port 8443.
 
 </details>
 
