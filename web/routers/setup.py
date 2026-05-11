@@ -267,6 +267,27 @@ async def setup_step6(request: Request):
     if not tunnel_started:
         return RedirectResponse(url="/setup?step=6&error=Failed+to+start+WireGuard+tunnel", status_code=302)
 
+    # Start the local SOCKS5 proxy so the tunnel-gateway can dial it via the
+    # overlay IP to reach this agent's internal_networks. The container-boot
+    # auto-start path in agent/main.py does this, but that only runs at boot —
+    # without the call here, a wizard-completed agent registers + handshakes
+    # but never accepts SOCKS5 CONNECTs, and every hunt probe gets
+    # "Host unreachable via SOCKS5" until the container is restarted.
+    try:
+        from agent.socks5_proxy import get_proxy
+        proxy = get_proxy()
+        proxy_started = await proxy.start()
+        if not proxy_started:
+            return RedirectResponse(
+                url="/setup?step=6&error=Failed+to+start+SOCKS5+proxy",
+                status_code=302,
+            )
+    except Exception as proxy_err:
+        return RedirectResponse(
+            url=f"/setup?step=6&error=SOCKS5+proxy+error:+{str(proxy_err).replace(' ', '+')}",
+            status_code=302,
+        )
+
     # Mark setup as completed
     set_config(AgentConfig.SETUP_COMPLETED, "true")
 
