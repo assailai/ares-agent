@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     wireguard_config_path: Path = Field(default=Path("/data/wireguard/wg0.conf"))
 
     # Agent information
-    agent_version: str = Field(default="2.3.0")
+    agent_version: str = Field(default="2.4.0")
 
     class Config:
         env_file = ".env"

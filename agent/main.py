@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 # Background task for wake signal polling
 _wake_signal_task = None
+# Background task for hunt_agent_tasks polling (local_network_scan dispatch).
+_task_poller_task = None
 
 
 async def poll_wake_signals():
@@ -137,6 +139,12 @@ async def lifespan(app: FastAPI):
     # Start wake signal polling in background
     _wake_signal_task = asyncio.create_task(poll_wake_signals())
 
+    # Start hunt-agent-task polling — dispatches local_network_scan tasks
+    # to the local-LAN scanner. No-op until the agent is registered.
+    global _task_poller_task
+    from agent.scanner.task_poller import poll_loop as poll_tasks_loop
+    _task_poller_task = asyncio.create_task(poll_tasks_loop())
+
     logger.info("Ares Docker Agent started successfully")
 
     yield
@@ -149,6 +157,14 @@ async def lifespan(app: FastAPI):
         _wake_signal_task.cancel()
         try:
             await _wake_signal_task
+        except asyncio.CancelledError:
+            pass
+
+    # Stop task polling
+    if _task_poller_task:
+        _task_poller_task.cancel()
+        try:
+            await _task_poller_task
         except asyncio.CancelledError:
             pass
 

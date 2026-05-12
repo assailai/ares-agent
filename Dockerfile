@@ -83,7 +83,7 @@ FROM python:3.12-alpine
 # Security labels
 LABEL maintainer="Assail AI <support@assail.ai>"
 LABEL description="Ares Docker Agent - Secure agent for internal API scanning"
-LABEL version="2.3.0"
+LABEL version="2.4.0"
 LABEL org.opencontainers.image.source="https://github.com/assailai/ares-agent"
 LABEL org.opencontainers.image.licenses="Proprietary"
 LABEL org.opencontainers.image.vendor="Assail AI"
@@ -101,6 +101,9 @@ RUN apk add --no-cache \
     su-exec \
     # Shell for entrypoint (dash is smaller than bash)
     dash \
+    # Stateless port scanner for local_network_scan task type.
+    # Requires CAP_NET_RAW at runtime (already granted alongside NET_ADMIN).
+    masscan \
     # Health check (wget is smaller than curl and already in Alpine)
     && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* \
     # Remove unnecessary files
@@ -151,6 +154,7 @@ RUN chmod -R 550 /app && \
           /app/agent/database/__init__.py \
           /app/agent/security/__init__.py \
           /app/agent/health/__init__.py \
+          /app/agent/scanner/__init__.py \
           /app/web/__init__.py \
           /app/web/routers/__init__.py \
           /app/proto/__init__.py && \
