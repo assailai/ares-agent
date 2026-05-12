@@ -164,11 +164,18 @@ async def _register_https(
     # Build registration endpoint via the agent-gateway ingress path
     registration_url = f"{platform_url.rstrip('/')}/agent-gateway/register"
 
+    # Capabilities the platform should record in hunt_agents.capabilities.
+    # Each value gates dispatch of a specific task_type — without
+    # `local_network_scan` here, the manager refuses to enqueue any
+    # local-LAN CIDR scan rows (returns 409 to network-scan-service).
+    from agent.scanner.schemas import CAPABILITY_LOCAL_NETWORK_SCAN
+
     payload = {
         "registration_token": registration_token,
         "wireguard_public_key": wireguard_public_key,
         "internal_networks": internal_networks,
-        "system_info": system_info
+        "system_info": system_info,
+        "capabilities": [CAPABILITY_LOCAL_NETWORK_SCAN],
     }
 
     logger.info(f"Connecting to registration endpoint: {registration_url}")
