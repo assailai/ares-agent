@@ -32,6 +32,14 @@ _POLL_INTERVAL_IDLE = 30  # seconds between polls when no tasks
 _POLL_INTERVAL_BUSY = 1   # seconds before checking for the next task
 _HTTP_CLIENT_TIMEOUT = 30.0
 
+# After this many consecutive 401s on /tasks, escalate the log from
+# warning → error so the failure is visible. The JWT was just issued
+# at registration; a persistent 401 here means a server-side auth
+# scoping problem on /tasks (it cannot be fixed by retrying) and
+# someone needs to look at it.
+_AUTH_FAILURE_ESCALATION_THRESHOLD = 5
+_consecutive_auth_failures = 0
+
 
 async def poll_loop() -> None:
     """Background coroutine — entry point from main.py lifespan."""
@@ -94,12 +102,26 @@ async def _fetch_pending_tasks() -> list[dict]:
         logger.debug("Task poll request failed: %s", exc)
         return []
 
+    global _consecutive_auth_failures
     if response.status_code == 401:
-        logger.warning("Task poll: auth token invalid or expired")
+        _consecutive_auth_failures += 1
+        if _consecutive_auth_failures == _AUTH_FAILURE_ESCALATION_THRESHOLD:
+            logger.error(
+                "Task poll: %d consecutive 401s from %s. The JWT was accepted at "
+                "registration; if other endpoints (e.g. /wake-signal) succeed with "
+                "the same token, this is a server-side auth scoping bug on /tasks "
+                "and will not be resolved by retrying.",
+                _consecutive_auth_failures, url,
+            )
+        else:
+            logger.warning("Task poll: auth token invalid or expired (count=%d)",
+                           _consecutive_auth_failures)
         return []
     if response.status_code != 200:
         logger.debug("Task poll: HTTP %s", response.status_code)
         return []
+
+    _consecutive_auth_failures = 0
 
     try:
         payload = response.json()
