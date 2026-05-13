@@ -190,13 +190,30 @@ async def _register_https(
 
             if response.status_code == 200:
                 data = response.json()
+                required = (
+                    "agent_id",
+                    "overlay_ip",
+                    "gateway_public_key",
+                    "gateway_endpoint",
+                    "jwt_token",
+                )
+                missing = [f for f in required if not data.get(f)]
+                if missing:
+                    return RegistrationResult(
+                        success=False,
+                        error_message=(
+                            "Platform returned 200 OK but registration response is "
+                            f"missing required field(s): {', '.join(missing)}. "
+                            "This is a server-side bug; the agent cannot proceed."
+                        ),
+                    )
                 return RegistrationResult(
                     success=True,
-                    agent_id=data.get("agent_id"),
-                    overlay_ip=data.get("overlay_ip"),
-                    gateway_public_key=data.get("gateway_public_key"),
-                    gateway_endpoint=data.get("gateway_endpoint"),
-                    jwt_token=data.get("jwt_token")
+                    agent_id=data["agent_id"],
+                    overlay_ip=data["overlay_ip"],
+                    gateway_public_key=data["gateway_public_key"],
+                    gateway_endpoint=data["gateway_endpoint"],
+                    jwt_token=data["jwt_token"],
                 )
             else:
                 try:
