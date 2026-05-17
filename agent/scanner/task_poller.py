@@ -28,8 +28,8 @@ from agent.scanner.schemas import (
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL_IDLE = 30  # seconds between polls when no tasks
-_POLL_INTERVAL_BUSY = 1   # seconds before checking for the next task
+_POLL_INTERVAL_IDLE = 30   # seconds between polls when no tasks
+_POLL_INTERVAL_BUSY = 0.1  # seconds before checking for the next task
 _HTTP_CLIENT_TIMEOUT = 30.0
 
 # After this many consecutive 401s on /tasks, escalate the log from
