@@ -164,7 +164,7 @@ async def _masscan_scan(
         "-p", port_arg,
         "--rate", str(rate_pps),
         "-oJ", "-",
-        "--wait", "1",  # seconds to wait after sending probes for late replies
+        "--wait", "0.5",  # seconds to wait after sending probes for late replies
     ]
     logger.info("masscan: %s", " ".join(cmd))
 
