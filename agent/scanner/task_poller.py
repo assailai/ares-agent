@@ -40,6 +40,15 @@ _HTTP_CLIENT_TIMEOUT = 30.0
 _AUTH_FAILURE_ESCALATION_THRESHOLD = 5
 _consecutive_auth_failures = 0
 
+# Lifecycle POSTs (/start, /complete, /fail) must reach the server or
+# the task is silently orphaned: the orchestrator keeps waiting for a
+# state transition that never comes, and the whole hunt wedges. We've
+# seen transient DNS failures (EAI_AGAIN) drop these in the field, so
+# retry with exponential backoff. Total worst-case wait: ~15s of sleep
+# plus up to 5 × _HTTP_CLIENT_TIMEOUT if the network is fully down.
+_LIFECYCLE_MAX_ATTEMPTS = 5
+_LIFECYCLE_BACKOFF_BASE = 1.0  # delays: 1s, 2s, 4s, 8s between attempts
+
 
 async def poll_loop() -> None:
     """Background coroutine — entry point from main.py lifespan."""
@@ -198,10 +207,37 @@ async def _mark_failed(task_id: str, error_message: str) -> None:
 
 async def _post_lifecycle(path: str, *, json_body: dict) -> None:
     url = f"{_platform_base()}{path}"
-    try:
-        async with httpx.AsyncClient(verify=True, timeout=_HTTP_CLIENT_TIMEOUT) as client:
-            response = await client.post(url, headers=_auth_headers(), json=json_body)
-        if response.status_code >= 400:
-            logger.warning("Lifecycle POST %s -> %s: %s", path, response.status_code, response.text[:200])
-    except httpx.RequestError as exc:
-        logger.warning("Lifecycle POST %s failed: %s", path, exc)
+    last_exc: Optional[httpx.RequestError] = None
+    last_status: Optional[int] = None
+    last_body: str = ""
+
+    for attempt in range(1, _LIFECYCLE_MAX_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(verify=True, timeout=_HTTP_CLIENT_TIMEOUT) as client:
+                response = await client.post(url, headers=_auth_headers(), json=json_body)
+        except httpx.RequestError as exc:
+            last_exc, last_status, last_body = exc, None, ""
+        else:
+            if response.status_code < 400:
+                return
+            last_exc, last_status, last_body = None, response.status_code, response.text[:200]
+            # 4xx is a permanent client error — retrying won't help.
+            if response.status_code < 500:
+                logger.warning("Lifecycle POST %s -> %s: %s", path, last_status, last_body)
+                return
+
+        if attempt < _LIFECYCLE_MAX_ATTEMPTS:
+            delay = _LIFECYCLE_BACKOFF_BASE * (2 ** (attempt - 1))
+            reason = last_exc if last_exc is not None else f"HTTP {last_status}"
+            logger.debug("Lifecycle POST %s attempt %d/%d failed (%s); retrying in %.1fs",
+                         path, attempt, _LIFECYCLE_MAX_ATTEMPTS, reason, delay)
+            await asyncio.sleep(delay)
+
+    # All retries exhausted. The task is now orphaned server-side and the
+    # orchestrator may wedge waiting for it — log at ERROR so it's visible.
+    if last_exc is not None:
+        logger.error("Lifecycle POST %s failed after %d attempts: %s",
+                     path, _LIFECYCLE_MAX_ATTEMPTS, last_exc)
+    else:
+        logger.error("Lifecycle POST %s failed after %d attempts: HTTP %s: %s",
+                     path, _LIFECYCLE_MAX_ATTEMPTS, last_status, last_body)
