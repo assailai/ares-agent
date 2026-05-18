@@ -173,9 +173,13 @@ ENV PYTHONPATH=/app \
 # Expose HTTPS port (unprivileged port, no root needed)
 EXPOSE 8443
 
-# Health check using wget (smaller than curl)
+# Health check using wget (smaller than curl).
+# Use 127.0.0.1, not "localhost": Alpine's /etc/hosts maps localhost to both
+# 127.0.0.1 and ::1, and busybox wget tries ::1 first. Uvicorn binds 0.0.0.0
+# (IPv4 only), so the v6 attempt is refused and busybox doesn't fall back —
+# producing endless "Connection refused" healthcheck failures.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD wget -q --spider --no-check-certificate https://localhost:8443/health || exit 1
+    CMD wget -q --spider --no-check-certificate https://127.0.0.1:8443/health || exit 1
 
 # Volume for persistent data (TLS certs, WireGuard keys, database)
 VOLUME ["/data"]
