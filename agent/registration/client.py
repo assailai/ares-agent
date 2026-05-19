@@ -170,12 +170,16 @@ async def _register_https(
     # local-LAN CIDR scan rows (returns 409 to network-scan-service).
     from agent.scanner.schemas import CAPABILITY_LOCAL_NETWORK_SCAN
 
+    # task_poller runs one task at a time (see its module docstring), so
+    # advertise concurrency=1 — the schema default of 5 misled dispatchers
+    # into queueing work the agent couldn't get to.
     payload = {
         "registration_token": registration_token,
         "wireguard_public_key": wireguard_public_key,
         "internal_networks": internal_networks,
         "system_info": system_info,
         "capabilities": [CAPABILITY_LOCAL_NETWORK_SCAN],
+        "max_concurrent_tasks": 1,
     }
 
     logger.info(f"Connecting to registration endpoint: {registration_url}")
