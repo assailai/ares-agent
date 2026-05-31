@@ -24,7 +24,8 @@ HEALTH_INTERVAL=3
 # never has to. Set ARES_SELF_UPDATE=false to skip it (dashboard then shows a
 # guided manual upgrade command instead).
 UPDATER_CONTAINER_NAME="ares-agent-updater"
-UPDATER_REGISTRY="ghcr.io/assailai/docker-agent-ares"
+# Public registry so customer hosts can pull updates without Assail creds.
+UPDATER_REGISTRY="docker.io/assailai/ares-agent"
 SELF_UPDATE="${ARES_SELF_UPDATE:-true}"
 
 if [ -t 1 ]; then

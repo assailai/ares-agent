@@ -61,8 +61,10 @@ services:
       - ARES_ROLE=updater            # entrypoint runs `python -m agent.updater`
       - ARES_AGENT_CONTAINER=ares-agent
       - ARES_AGENT_DATA_VOLUME=ares-agent-data
-      # The single registry the updater trusts (cosign-signed releases):
-      - ARES_AGENT_REGISTRY=ghcr.io/assailai/docker-agent-ares
+      # The single (PUBLIC) registry the updater trusts (cosign-signed releases).
+      # Public so customer hosts can pull without Assail creds; signed on both
+      # Docker Hub and ghcr with the same digest.
+      - ARES_AGENT_REGISTRY=docker.io/assailai/ares-agent
     volumes:
       - ares-agent-data:/data        # shared: read JWT/platform_url, write lock/state
       # Docker Engine API.
