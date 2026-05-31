@@ -114,6 +114,12 @@ RUN apk add --no-cache \
 COPY --from=wireguard-builder /build/wireguard-go/wireguard-go /usr/local/bin/
 RUN chmod 755 /usr/local/bin/wireguard-go
 
+# Bundle the cosign binary from the official (itself-signed) distroless image,
+# pinned by tag. The updater sidecar uses it to verify the agent image signature
+# before installing an update — the root of trust for self-update.
+COPY --from=gcr.io/projectsigstore/cosign:v2.4.1 /ko-app/cosign /usr/local/bin/cosign
+RUN chmod 555 /usr/local/bin/cosign
+
 # Install Python wheels (no compilation needed)
 COPY --from=python-builder /wheels /wheels
 RUN pip install --no-cache-dir --no-compile /wheels/*.whl \

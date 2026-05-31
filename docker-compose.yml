@@ -39,6 +39,43 @@ services:
       retries: 3
       start_period: 30s
 
+  # ---------------------------------------------------------------------------
+  # Self-update sidecar (opt-in)
+  # ---------------------------------------------------------------------------
+  # Performs dashboard-triggered upgrades. It holds the Docker socket so the
+  # network-exposed agent never has to — a compromise of the agent (root +
+  # NET_ADMIN, listening on 8443) therefore cannot reach the Docker Engine.
+  # The updater has NO inbound ports and only verified, constrained behaviour:
+  # it pulls a cosign-signed image BY DIGEST and recreates the agent from a
+  # fixed recipe.
+  #
+  # If you do NOT want to expose the Docker socket, delete this service — the
+  # dashboard will then show a guided manual upgrade command instead.
+  ares-agent-updater:
+    image: assailai/ares-agent:latest
+    platform: linux/amd64
+    container_name: ares-agent-updater
+    hostname: ares-agent-updater
+    user: root                       # required to access the Docker socket
+    environment:
+      - ARES_ROLE=updater            # entrypoint runs `python -m agent.updater`
+      - ARES_AGENT_CONTAINER=ares-agent
+      - ARES_AGENT_DATA_VOLUME=ares-agent-data
+      # The single registry the updater trusts (cosign-signed releases):
+      - ARES_AGENT_REGISTRY=ghcr.io/assailai/docker-agent-ares
+    volumes:
+      - ares-agent-data:/data        # shared: read JWT/platform_url, write lock/state
+      # Docker Engine API.
+      #   Linux / macOS (Docker Desktop): the unix socket below.
+      #   Windows (Docker Desktop): replace with the named pipe, e.g.
+      #     - "//./pipe/docker_engine://./pipe/docker_engine"
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true       # the updater never needs to escalate
+    restart: unless-stopped
+    depends_on:
+      - ares-agent
+
 volumes:
   ares-agent-data:
     driver: local

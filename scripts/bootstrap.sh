@@ -20,6 +20,13 @@ VOLUME_NAME="ares-agent-data"
 HEALTH_TIMEOUT=90
 HEALTH_INTERVAL=3
 
+# Self-update sidecar. Holds the Docker socket so the network-exposed agent
+# never has to. Set ARES_SELF_UPDATE=false to skip it (dashboard then shows a
+# guided manual upgrade command instead).
+UPDATER_CONTAINER_NAME="ares-agent-updater"
+UPDATER_REGISTRY="ghcr.io/assailai/docker-agent-ares"
+SELF_UPDATE="${ARES_SELF_UPDATE:-true}"
+
 if [ -t 1 ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -111,6 +118,7 @@ check_existing_container() {
     if [ ! -t 0 ]; then
         warn "Non-interactive mode: removing existing container (data volume preserved)."
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        docker rm -f "$UPDATER_CONTAINER_NAME" >/dev/null 2>&1 || true
         return
     fi
 
@@ -125,6 +133,7 @@ check_existing_container() {
         r|R)
             info "Removing existing container and volume..."
             docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            docker rm -f "$UPDATER_CONTAINER_NAME" >/dev/null 2>&1 || true
             docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
             info "Removed."
             ;;
@@ -181,6 +190,53 @@ start_container() {
     fi
 
     info "Container started."
+}
+
+start_updater() {
+    if [ "$SELF_UPDATE" != "true" ]; then
+        info "Self-update sidecar disabled (ARES_SELF_UPDATE=$SELF_UPDATE) — skipping."
+        return
+    fi
+
+    step "Starting self-update sidecar"
+
+    # The updater reaches the Docker Engine over the host socket/pipe. On
+    # Windows/Git Bash that's a named pipe we can't bind-mount the same way;
+    # skip there (use WSL 2 for full support).
+    if [ "$PLATFORM" = "windows" ]; then
+        warn "Windows/Git Bash: self-update sidecar skipped (needs the Docker named pipe)."
+        warn "Use WSL 2, or run it manually with: -v //./pipe/docker_engine://./pipe/docker_engine"
+        return
+    fi
+
+    local sock="/var/run/docker.sock"
+    if [ ! -S "$sock" ]; then
+        warn "Docker socket not found at $sock — skipping self-update sidecar."
+        warn "The dashboard will show a guided manual upgrade command instead."
+        return
+    fi
+
+    docker rm -f "$UPDATER_CONTAINER_NAME" >/dev/null 2>&1 || true
+
+    # No published ports (no inbound). Holds the socket so the agent doesn't.
+    if ! docker run -d --name "$UPDATER_CONTAINER_NAME" \
+        --platform linux/amd64 \
+        --user root \
+        --security-opt no-new-privileges:true \
+        -e ARES_ROLE=updater \
+        -e ARES_AGENT_CONTAINER="$CONTAINER_NAME" \
+        -e ARES_AGENT_DATA_VOLUME="$VOLUME_NAME" \
+        -e ARES_AGENT_REGISTRY="$UPDATER_REGISTRY" \
+        -v "${VOLUME_NAME}:/data" \
+        -v "${sock}:/var/run/docker.sock" \
+        --restart unless-stopped \
+        "$IMAGE" >/dev/null; then
+        warn "Failed to start self-update sidecar (non-fatal). The agent still runs;"
+        warn "dashboard upgrades will fall back to the guided manual command."
+        return
+    fi
+
+    info "Self-update sidecar started (dashboard 'Update' button now works)."
 }
 
 wait_for_healthy() {
@@ -392,6 +448,7 @@ main() {
     pull_image
     start_container
     wait_for_healthy
+    start_updater
     extract_password
     trust_certificate
     open_browser

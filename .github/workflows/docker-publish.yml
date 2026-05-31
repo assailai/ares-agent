@@ -21,6 +21,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write   # required for cosign keyless (OIDC) signing
 
     steps:
       - name: Checkout repository
@@ -64,6 +65,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -76,3 +78,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SLSA provenance + SBOM attestations, pushed alongside the image.
+          # The agent updater verifies these before installing a release.
+          provenance: mode=max
+          sbom: true
+
+      # --- Supply-chain: keyless cosign signing -------------------------------
+      # The signature is the ROOT OF TRUST for self-update: the agent updater
+      # refuses any image whose digest isn't signed by THIS workflow's OIDC
+      # identity. Signing is keyless (Fulcio cert + Rekor transparency log) — no
+      # long-lived private key stored in CI to steal. Verify side (updater) pins:
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      #   --certificate-identity-regexp '^https://github.com/assailai/docker-agent-ares/.github/workflows/docker-publish.yml@'
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the published image by digest (keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign every image ref at the immutable digest. cosign records each
+          # signature in the public Rekor transparency log.
+          cosign sign --yes "${REGISTRY_GHCR}/${IMAGE_NAME}@${DIGEST}"
+          cosign sign --yes "docker.io/assailai/ares-agent@${DIGEST}"
+          # Surface the signed digest in the job summary so the release →
+          # platform release-registry entry (version → digest) can be recorded.
+          echo "Signed digest: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
