@@ -35,3 +35,8 @@ pydantic-settings==2.6.1
 
 # Session management
 itsdangerous==2.2.0
+
+# Self-update sidecar (ARES_ROLE=updater): talks to the Docker Engine API over
+# the unix socket (Linux/macOS) or named pipe (Windows) to swap the agent
+# container. Unused by the normal agent role.
+docker==7.1.0

@@ -6,6 +6,8 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
+from agent.__version__ import __version__
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
@@ -37,8 +39,8 @@ class Settings(BaseSettings):
     wireguard_interface: str = Field(default="wg0")
     wireguard_config_path: Path = Field(default=Path("/data/wireguard/wg0.conf"))
 
-    # Agent information
-    agent_version: str = Field(default="2.4.0")
+    # Agent information — single source of truth lives in agent/__version__.py.
+    agent_version: str = Field(default=__version__)
 
     class Config:
         env_file = ".env"

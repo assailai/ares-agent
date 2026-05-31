@@ -18,7 +18,22 @@ log_info() { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
 log_warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 log_error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
 
-log_info "Starting Ares Docker Agent v2.3.0..."
+# Version comes from the single source of truth (agent/__version__.py) so the
+# banner can never drift from what the agent reports to the platform.
+# PYTHONPATH=/app is set in the image, so this resolves from any cwd.
+AGENT_VERSION="$(python -c 'from agent.__version__ import __version__; print(__version__)' 2>/dev/null || echo 'unknown')"
+log_info "Starting Ares Docker Agent v${AGENT_VERSION}..."
+
+# Updater role: this is the self-update sidecar. It does NO WireGuard/network
+# setup and never listens — it only talks to the Docker Engine API (mounted
+# socket/pipe) and the platform. Keeping the socket OFF the agent role is the
+# core containment decision: a compromise of the network-exposed agent can't
+# reach Docker.
+if [ "${ARES_ROLE:-agent}" = "updater" ]; then
+    log_info "Role=updater — starting self-update loop (no network setup)..."
+    cd /app
+    exec python -u -m agent.updater
+fi
 
 # Detect if running as root
 CURRENT_UID=$(id -u)

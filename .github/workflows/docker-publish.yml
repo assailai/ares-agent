@@ -21,20 +21,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write   # required for cosign keyless (OIDC) signing
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ${{ env.REGISTRY_GHCR }}
           username: ${{ github.actor }}
@@ -42,14 +43,14 @@ jobs:
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         with:
           images: |
             ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
@@ -64,7 +65,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        id: build
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
           # Note: arm64 disabled due to grpcio compilation issues on Alpine/musl
@@ -76,3 +78,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SLSA provenance + SBOM attestations, pushed alongside the image.
+          # The agent updater verifies these before installing a release.
+          provenance: mode=max
+          sbom: true
+
+      # --- Supply-chain: keyless cosign signing -------------------------------
+      # The signature is the ROOT OF TRUST for self-update: the agent updater
+      # refuses any image whose digest isn't signed by THIS workflow's OIDC
+      # identity. Signing is keyless (Fulcio cert + Rekor transparency log) — no
+      # long-lived private key stored in CI to steal. Verify side (updater) pins:
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      #   --certificate-identity-regexp '^https://github.com/assailai/docker-agent-ares/.github/workflows/docker-publish.yml@'
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
+
+      - name: Sign the published image by digest (keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign every image ref at the immutable digest. cosign records each
+          # signature in the public Rekor transparency log.
+          cosign sign --yes "${REGISTRY_GHCR}/${IMAGE_NAME}@${DIGEST}"
+          cosign sign --yes "docker.io/assailai/ares-agent@${DIGEST}"
+          # Surface the signed digest in the job summary so the release →
+          # platform release-registry entry (version → digest) can be recorded.
+          echo "Signed digest: ${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
