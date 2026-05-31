@@ -2,6 +2,7 @@
 Ares Docker Agent - Setup Wizard Routes
 """
 import ipaddress
+import json
 from pathlib import Path
 from typing import List
 from fastapi import APIRouter, Request, Form, Depends
@@ -61,7 +62,22 @@ async def setup_wizard(request: Request, step: int = 1, error: str = None):
     # Get any saved values
     saved_platform_url = get_config(AgentConfig.PLATFORM_URL, "")
     saved_agent_name = get_config(AgentConfig.AGENT_NAME, "")
-    saved_networks = get_config(AgentConfig.INTERNAL_NETWORKS, "")
+
+    # INTERNAL_NETWORKS is persisted as a JSON array (see step3's json.dumps).
+    # The step-3 textarea expects one CIDR per line — render the parsed list,
+    # NOT its JSON representation. Without this, clicking Back into the wizard
+    # would refill the textarea with `["192.168.2.0/24"]`, which step3 then
+    # re-parses as a single CIDR and rejects as "Invalid CIDR notation".
+    saved_networks_raw = get_config(AgentConfig.INTERNAL_NETWORKS, "")
+    saved_networks = saved_networks_raw
+    if saved_networks_raw:
+        try:
+            parsed = json.loads(saved_networks_raw)
+            if isinstance(parsed, list):
+                saved_networks = "\n".join(str(n) for n in parsed)
+        except (ValueError, TypeError):
+            # Not JSON (e.g. legacy plaintext) — leave as-is.
+            pass
 
     return templates.TemplateResponse("setup_wizard.html", {
         "request": request,

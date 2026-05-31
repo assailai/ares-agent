@@ -31,6 +31,72 @@ logger = logging.getLogger(__name__)
 _wake_signal_task = None
 # Background task for hunt_agent_tasks polling (local_network_scan dispatch).
 _task_poller_task = None
+# Background task for heartbeats (status + CPU/memory telemetry).
+_heartbeat_task = None
+
+
+async def send_heartbeats():
+    """
+    Background task that posts a heartbeat to hunt-agent-manager every 60s.
+
+    Carries live CPU/memory telemetry + the agent version so the Ares dashboard
+    can render Resource Telemetry and keep the reported version in sync. Without
+    this loop the platform's heartbeat metadata never populates and the agent
+    detail view shows 0% CPU / 0% memory.
+    """
+    import httpx
+    import asyncio
+    from agent.health.system_metrics import read_cpu_percent, read_memory_percent
+
+    logger.info("💓 Heartbeat loop started")
+
+    while True:
+        try:
+            await asyncio.sleep(60)  # Heartbeat cadence expected by the platform
+
+            platform_url = get_config(AgentConfig.PLATFORM_URL)
+            auth_token = get_config(AgentConfig.JWT_TOKEN)
+            if not platform_url or not auth_token:
+                logger.debug("Agent not registered, skipping heartbeat")
+                continue
+
+            # CPU sampling blocks briefly (reads /proc/stat twice) — keep it off
+            # the event loop. Memory is a single cheap read.
+            cpu_percent = await asyncio.to_thread(read_cpu_percent)
+            memory_percent = read_memory_percent()
+
+            heartbeat_url = f"{platform_url.rstrip('/')}/api/v1/agent/heartbeat"
+            payload = {
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory_percent,
+                "status": "idle",
+                "agent_version": settings.agent_version,
+            }
+
+            try:
+                async with httpx.AsyncClient(verify=True, timeout=10.0) as client:
+                    response = await client.post(
+                        heartbeat_url,
+                        headers={"Authorization": f"Bearer {auth_token}"},
+                        json=payload,
+                    )
+                    if response.status_code == 401:
+                        logger.warning("Heartbeat: auth token invalid or expired")
+                    elif response.status_code != 200:
+                        logger.debug(f"Heartbeat: HTTP {response.status_code}")
+            except httpx.TimeoutException:
+                logger.debug("Heartbeat: timeout (server may be unavailable)")
+            except httpx.ConnectError:
+                logger.debug("Heartbeat: connection failed")
+            except Exception as e:
+                logger.debug(f"Heartbeat error: {e}")
+
+        except asyncio.CancelledError:
+            logger.info("Heartbeat loop stopped")
+            break
+        except Exception as e:
+            logger.error(f"Heartbeat loop error: {e}")
+            await asyncio.sleep(60)
 
 
 async def poll_wake_signals():
@@ -145,6 +211,11 @@ async def lifespan(app: FastAPI):
     from agent.scanner.task_poller import poll_loop as poll_tasks_loop
     _task_poller_task = asyncio.create_task(poll_tasks_loop())
 
+    # Start heartbeat loop — reports status + CPU/memory telemetry to the
+    # platform. No-op until the agent is registered.
+    global _heartbeat_task
+    _heartbeat_task = asyncio.create_task(send_heartbeats())
+
     logger.info("Ares Docker Agent started successfully")
 
     yield
@@ -165,6 +236,14 @@ async def lifespan(app: FastAPI):
         _task_poller_task.cancel()
         try:
             await _task_poller_task
+        except asyncio.CancelledError:
+            pass
+
+    # Stop heartbeat loop
+    if _heartbeat_task:
+        _heartbeat_task.cancel()
+        try:
+            await _heartbeat_task
         except asyncio.CancelledError:
             pass
 
