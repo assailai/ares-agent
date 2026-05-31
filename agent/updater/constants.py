@@ -9,8 +9,10 @@ import os
 
 # --- Pinned image source ----------------------------------------------------
 # The ONLY registry/repo the updater will pull from. A directive whose `registry`
-# field differs is rejected.
-PINNED_REGISTRY = os.getenv("ARES_AGENT_REGISTRY", "ghcr.io/assailai/docker-agent-ares")
+# field differs is rejected. Must be a PUBLIC registry so customer hosts can pull
+# without Assail credentials (ghcr.io/assailai/* is private; Docker Hub is public).
+# The image is cosign-signed on both registries with the same digest + identity.
+PINNED_REGISTRY = os.getenv("ARES_AGENT_REGISTRY", "docker.io/assailai/ares-agent")
 
 # --- cosign keyless verification identity (the release workflow) ------------
 # These pin WHO signed the image. Keyless cosign verifies a Fulcio cert whose
