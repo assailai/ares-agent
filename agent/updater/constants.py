@@ -29,6 +29,10 @@ COSIGN_IDENTITY_REGEXP = os.getenv(
 AGENT_CONTAINER_NAME = os.getenv("ARES_AGENT_CONTAINER", "ares-agent")
 AGENT_DATA_VOLUME = os.getenv("ARES_AGENT_DATA_VOLUME", "ares-agent-data")
 AGENT_PORT = 8443
+# The agent image is published linux/amd64 only (arm64 disabled). On an arm64
+# host (Apple Silicon) docker-py would otherwise resolve the host arch and fail
+# with "no matching manifest for linux/arm64". Pin it for pull + run.
+AGENT_PLATFORM = os.getenv("ARES_AGENT_PLATFORM", "linux/amd64")
 
 # HostConfig recipe applied to the recreated agent. Constant on purpose: this is
 # what stops a forged/compromised directive from recreating the agent with, e.g.,

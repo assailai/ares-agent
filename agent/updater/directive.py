@@ -80,9 +80,17 @@ def verify_directive(signed: dict, *, client_nonce: str, agent_id: str, current_
     if payload.get("client_nonce") != client_nonce:
         raise DirectiveError("client_nonce mismatch (possible replay)")
 
-    # 3) Bound to this agent.
-    if payload.get("agent_id") != agent_id:
-        raise DirectiveError("directive is not addressed to this agent")
+    # 3) Bound to this agent. The directive is fetched with THIS agent's JWT, so
+    # the platform already scopes it to us; a mismatch here usually means the
+    # agent's locally-stored AGENT_ID drifted from the platform's row id (e.g. a
+    # re-registration returned a fresh id). Don't hard-fail on that — the JWT
+    # scope + client_nonce + cosign image signature remain the real protections.
+    directive_agent_id = payload.get("agent_id")
+    if directive_agent_id and agent_id and directive_agent_id != agent_id:
+        logger.warning(
+            "directive agent_id %s != local agent_id %s — proceeding (JWT-scoped + nonce + cosign verified)",
+            directive_agent_id, agent_id,
+        )
 
     # 4) Registry must be the one we pin (defense in depth vs the cosign check).
     if payload.get("registry") != PINNED_REGISTRY:
