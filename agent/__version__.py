@@ -11,5 +11,5 @@ Keep this in lockstep with the platform's LATEST_AGENT_VERSION
 as "up to date" in the dashboard.
 """
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 """Current agent build version (semver, no leading 'v')."""
