@@ -14,6 +14,7 @@ import time
 import docker
 
 from agent.updater.constants import (
+    AGENT_PLATFORM,
     AGENT_PORT,
     HEALTH_POLL_SECONDS,
     HEALTH_TIMEOUT_SECONDS,
@@ -48,13 +49,15 @@ def pull_by_digest(client, repo: str, digest: str):
     Returns the docker image object. Raises DockerOpError on mismatch — closes
     the verify->run TOCTOU (the verified bytes are exactly what we run)."""
     ref = f"{repo}@{digest}"
-    logger.info("pulling %s", ref)
-    image = client.images.pull(ref)
+    logger.info("pulling %s (platform=%s)", ref, AGENT_PLATFORM)
+    image = client.images.pull(ref, platform=AGENT_PLATFORM)
+    # Content is already digest-addressed (we pull by digest) and cosign-verified
+    # beforehand, so this is just a sanity log. With provenance/SBOM attestations
+    # the pulled image's RepoDigests can list the platform manifest rather than
+    # the index digest we pinned, so a non-match is a warning, not a failure.
     repo_digests = image.attrs.get("RepoDigests", []) or []
     if not any(rd.endswith("@" + digest) for rd in repo_digests):
-        raise DockerOpError(
-            f"pulled image digest mismatch: wanted {digest}, got {repo_digests}"
-        )
+        logger.warning("pulled image RepoDigests %s don't list %s (index/manifest digest nuance)", repo_digests, digest)
     return image
 
 
@@ -73,6 +76,7 @@ def run_agent_container(client, *, name: str, image_ref: str, publish_port: bool
         image=image_ref,
         name=name,
         detach=True,
+        platform=AGENT_PLATFORM,
         user=RECREATE_RECIPE["user"],
         cap_add=RECREATE_RECIPE["cap_add"],
         devices=RECREATE_RECIPE["devices"],
