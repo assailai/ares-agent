@@ -3,8 +3,14 @@ Ares Docker Agent - Main FastAPI Application
 """
 import logging
 import ssl
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Captured at process start (≈ container start) so heartbeats can report how long
+# this agent has been running ("uptime since connect"). Survives across the
+# heartbeat loop; resets when the container is recreated (e.g. a self-update).
+_AGENT_START_MONOTONIC = time.monotonic()
 
 from fastapi import FastAPI, Request, Depends
 from fastapi.responses import RedirectResponse
@@ -71,6 +77,7 @@ async def send_heartbeats():
                 "memory_percent": memory_percent,
                 "status": "idle",
                 "agent_version": settings.agent_version,
+                "uptime_seconds": int(time.monotonic() - _AGENT_START_MONOTONIC),
             }
 
             try:
