@@ -1,43 +1,27 @@
 # =============================================================================
-# Ares Docker Agent - Docker Compose (Production)
+# Ares Docker Agent - Docker Compose (production)
 # =============================================================================
+# Zero-touch: set ARES_TOKEN (a registration token from the Ares dashboard) and run.
 #
-# Usage:
-#   docker compose up -d
-#   docker compose logs -f
+#   ARES_TOKEN=ares_agt_... docker compose up -d
+#   docker compose logs -f            # watch it enroll and come online
 #
-# To get the initial password:
-#   docker compose logs ares-agent | grep "Initial Password"
-#
+# Outbound-only (HTTPS + WebSocket to ares); no published ports, no extra capabilities.
 # =============================================================================
 
 services:
   ares-agent:
-    image: assailai/ares-agent:latest
+    image: ghcr.io/assail/ares-agent:latest
     platform: linux/amd64
     container_name: ares-agent
     hostname: ares-agent
-    user: root
-    ports:
-      - "8443:8443"
     volumes:
       - ares-agent-data:/data
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
     environment:
-      - ARES_RUN_AS_ROOT=true
+      - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token from the dashboard}
+      # - ARES_URL=https://api.assailai.com        # override when self-hosting
+      # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override LAN auto-detection
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://localhost:8443/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
 volumes:
   ares-agent-data:
