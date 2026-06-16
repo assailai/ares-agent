@@ -1,6 +1,6 @@
 """Ares Docker Agent configuration (zero-touch, environment-driven).
 
-One command brings the agent up: ``docker run -e ARES_TOKEN=... ghcr.io/assail/ares-agent``.
+One command brings the agent up: ``docker run -e ARES_TOKEN=... ghcr.io/assailai/ares-agent``.
 Everything else has a sensible default. There is no interactive setup wizard.
 """
 

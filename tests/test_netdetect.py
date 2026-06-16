@@ -1,4 +1,4 @@
-"""Network auto-detection: report real RFC1918 LANs, never virtual/overlay ranges."""
+"""Network auto-detection: report real RFC1918 LANs, never virtual/VPN ranges."""
 
 from __future__ import annotations
 
@@ -20,11 +20,11 @@ def test_excludes_docker_bridge_and_virtual_interfaces() -> None:
     assert networks_from_interfaces(rows) == ["10.10.5.0/24"]
 
 
-def test_excludes_loopback_link_local_and_overlay() -> None:
+def test_excludes_loopback_link_local_and_vpn_interfaces() -> None:
     rows = [
         ("lo", "127.0.0.1", 8),
         ("eth0", "169.254.1.1", 16),  # link-local
-        ("wg0", "10.200.0.7", 16),  # the agent's own overlay
+        ("wg0", "10.200.0.7", 16),  # a VPN interface, skipped by name
         ("eth1", "10.0.0.5", 24),
     ]
     assert networks_from_interfaces(rows) == ["10.0.0.0/24"]

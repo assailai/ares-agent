@@ -11,7 +11,7 @@
 
 services:
   ares-agent:
-    image: ghcr.io/assail/ares-agent:latest
+    image: ghcr.io/assailai/ares-agent:latest
     platform: linux/amd64
     container_name: ares-agent
     hostname: ares-agent

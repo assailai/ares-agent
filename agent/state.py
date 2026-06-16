@@ -1,7 +1,7 @@
 """Durable agent identity, persisted as a single JSON file.
 
-Replaces the old SQLite/admin store: a deployed agent only needs to remember who it is
-(its id + bearer token). Written 0600 so the token is not world-readable.
+A deployed agent only needs to remember who it is (its id + bearer token); the file is
+written 0600 so the token is not world-readable.
 """
 
 from __future__ import annotations

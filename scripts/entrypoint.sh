@@ -4,8 +4,8 @@
 # =============================================================================
 # No web server, no setup wizard. The agent reads ARES_TOKEN from the environment,
 # auto-detects its internal LAN(s), registers over HTTPS, then heartbeats + polls.
-# WireGuard (data plane) needs --cap-add=NET_ADMIN --device /dev/net/tun; the
-# control plane runs fine without them.
+# The data plane is an outbound WebSocket the agent opens while a hunt runs, so no
+# inbound ports and no extra capabilities (NET_ADMIN, /dev/net/tun) are needed.
 # =============================================================================
 set -e
 

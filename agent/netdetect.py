@@ -1,9 +1,9 @@
 """Auto-detect the host's internal LAN(s) so the client never types a CIDR by hand.
 
-Reports only RFC1918 networks on real interfaces. Container/overlay/virtual interfaces
-(docker0, br-*, veth*, wg*, tun*, loopback) and the agent's own WireGuard overlay are
-excluded so we never advertise the container bridge (172.17.0.0/16) as a target. The
-parsing is split from the OS calls so the filtering logic is unit-testable.
+Reports only RFC1918 networks on real interfaces. Container, VPN, and virtual interfaces
+(docker0, br-*, veth*, wg*, tun*, loopback) are excluded so we never advertise the
+container bridge (172.17.0.0/16) as a target. The parsing is split from the OS calls so
+the filtering logic is unit-testable.
 """
 
 from __future__ import annotations
@@ -29,8 +29,6 @@ _SKIP_IFACE_PREFIXES = (
     "vxlan",
     "utun",
 )
-# the agent's own WireGuard overlay pool (must never be reported as a scan target).
-_OVERLAY = ipaddress.ip_network("10.200.0.0/16")
 
 
 def _skip_iface(name: str) -> bool:
@@ -40,8 +38,8 @@ def _skip_iface(name: str) -> bool:
 def networks_from_interfaces(interfaces: list[tuple[str, str, int]]) -> list[str]:
     """Collapse ``(iface, ipv4, prefixlen)`` rows into covering RFC1918 CIDRs.
 
-    Pure: the testable core. Excludes virtual interfaces, the overlay pool, and any
-    non-private / loopback / link-local range; dedupes on the covering network.
+    Pure: the testable core. Excludes virtual/VPN interfaces and any non-private /
+    loopback / link-local range; dedupes on the covering network.
     """
     found: dict[str, None] = {}
     for name, ip, prefix in interfaces:
@@ -52,8 +50,6 @@ def networks_from_interfaces(interfaces: list[tuple[str, str, int]]) -> list[str
         except ValueError:
             continue
         if net.version != 4 or not net.is_private or net.is_loopback or net.is_link_local:
-            continue
-        if net.subnet_of(_OVERLAY):
             continue
         found[str(net)] = None
     return sorted(found)

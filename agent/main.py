@@ -1,6 +1,6 @@
 """Ares Docker Agent: headless, zero-touch control-plane client.
 
-One command runs it: ``docker run -e ARES_TOKEN=... ghcr.io/assail/ares-agent``. The agent
+One command runs it: ``docker run -e ARES_TOKEN=... ghcr.io/assailai/ares-agent``. The agent
 auto-detects its internal LAN(s), registers over HTTPS, then heartbeats and polls for scan
 tasks. When an internal hunt is running it opens an outbound data-plane tunnel so ares can
 reach the discovered internal hosts. There is no web UI and no interactive setup; logs
