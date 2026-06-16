@@ -58,10 +58,24 @@ async def _register(state: AgentState, networks: list[str]) -> AgentState:
     return state
 
 
+def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
+    """Surface sustained trouble without spamming the log: the first failure and every
+    tenth after it are WARNING (visible at the default INFO level); the rest stay DEBUG.
+    The caller logs the matching recovery once the call succeeds again."""
+    if failures == 1 or failures % 10 == 0:
+        logger.warning("%s failing (attempt %d): %s", what, failures, exc)
+    else:
+        logger.debug("%s failed (attempt %d): %s", what, failures, exc)
+
+
 async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
+    failures = 0
     while True:
         try:
             resp = await control_plane.heartbeat(settings, state.agent_token or "")
+            if failures:
+                logger.info("Heartbeat recovered after %d failed attempt(s).", failures)
+                failures = 0
             _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
             tunnel.sync(bool(resp.get("tunnel_required")))
             if resp.get("restart_requested"):
@@ -72,13 +86,17 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
                     "Update queued (latest=%s); self-update is not wired in this build.",
                     resp.get("latest_version"),
                 )
+        except asyncio.CancelledError:
+            raise
         except httpx.HTTPStatusError as exc:
+            failures += 1
             if exc.response.status_code == 401:
                 logger.error("Heartbeat unauthorized: the agent may have been decommissioned.")
             else:
-                logger.debug("heartbeat failed: %s", exc)
-        except (httpx.HTTPError, OSError) as exc:
-            logger.debug("heartbeat failed: %s", exc)
+                _log_repeated_failure("heartbeat", failures, exc)
+        except Exception as exc:  # noqa: BLE001 - keep heartbeating through any transient error
+            failures += 1
+            _log_repeated_failure("heartbeat", failures, exc)
         await asyncio.sleep(_cadence["heartbeat"])
 
 
@@ -96,19 +114,28 @@ async def _run_task(token: str, task: dict) -> None:
         hosts = await scan.scan_cidr(cidr, ports, timeout=_PROBE_TIMEOUT)
         await control_plane.task_completed(settings, token, task_id, hosts)
         logger.info("Reported %d discovered host(s) for %s", len(hosts), cidr)
-    except (httpx.HTTPError, OSError) as exc:
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - report any scan failure instead of dropping the task
         logger.error("Scan task %s failed: %s", task_id, exc)
         await control_plane.task_failed(settings, token, task_id, f"{type(exc).__name__}: {exc}")
 
 
 async def _poll_loop(state: AgentState) -> None:
+    failures = 0
     while True:
         try:
             tasks = await control_plane.poll_tasks(settings, state.agent_token or "")
+            if failures:
+                logger.info("Task polling recovered after %d failed attempt(s).", failures)
+                failures = 0
             for task in tasks:
                 await _run_task(state.agent_token or "", task)
-        except (httpx.HTTPError, OSError) as exc:
-            logger.debug("task poll failed: %s", exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep polling through any transient error
+            failures += 1
+            _log_repeated_failure("task poll", failures, exc)
         await asyncio.sleep(_cadence["poll"])
 
 

@@ -31,7 +31,8 @@ _CLOSE = 5
 _HEADER = struct.Struct(">BQ")
 _RELAY_CHUNK = 65536
 _DIAL_TIMEOUT = 10.0
-_RECONNECT_BACKOFF = 3.0
+_RECONNECT_BACKOFF_MIN = 1.0
+_RECONNECT_BACKOFF_MAX = 30.0
 
 
 def _encode(opcode: int, stream_id: int, payload: bytes = b"") -> bytes:
@@ -91,8 +92,12 @@ class TunnelClient:
             logger.info("tunnel connected")
             try:
                 async for message in ws:
-                    if isinstance(message, bytes):
+                    if not isinstance(message, bytes):
+                        continue
+                    try:
                         await self._handle(message)
+                    except Exception as exc:  # noqa: BLE001 - one bad frame must not drop the tunnel
+                        logger.warning("error handling tunnel frame: %s", exc)
             finally:
                 for writer in self._writers.values():
                     writer.close()
@@ -113,8 +118,13 @@ class TunnelClient:
                 writer.close()
 
     async def _open(self, stream_id: int, payload: bytes) -> None:
-        target = json.loads(payload)
-        host, port = target["host"], int(target["port"])
+        try:
+            target = json.loads(payload)
+            host, port = str(target["host"]), int(target["port"])
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("ignoring malformed OPEN frame: %s", exc)
+            await self._send(_encode(_OPEN_ERR, stream_id))
+            return
         if not self._target_allowed(host):
             logger.warning("refused tunnel target outside allowlist: %s", host)
             await self._send(_encode(_OPEN_ERR, stream_id))
@@ -123,7 +133,8 @@ class TunnelClient:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=_DIAL_TIMEOUT
             )
-        except (OSError, asyncio.TimeoutError):
+        except (OSError, asyncio.TimeoutError) as exc:
+            logger.info("tunnel dial to %s:%d failed: %s", host, port, exc)
             await self._send(_encode(_OPEN_ERR, stream_id))
             return
         self._writers[stream_id] = writer
@@ -179,11 +190,14 @@ class TunnelManager:
             self._task = None
 
     async def _supervise(self) -> None:
+        backoff = _RECONNECT_BACKOFF_MIN
         while True:
             try:
                 await TunnelClient(*self._args, insecure=self._insecure).run()
+                backoff = _RECONNECT_BACKOFF_MIN  # clean close; the next reconnect starts fresh
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect on any transport error
-                logger.warning("tunnel disconnected: %s; reconnecting", exc)
-            await asyncio.sleep(_RECONNECT_BACKOFF)
+                logger.warning("tunnel disconnected: %s; reconnecting in %.0fs", exc, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, _RECONNECT_BACKOFF_MAX)
