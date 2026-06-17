@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from updater.config import UpdaterSettings
+from updater.config import UpdaterSettings, tag_of
 
 logger = logging.getLogger("ares.updater.k8s")
 
@@ -41,11 +41,6 @@ def _client() -> httpx.Client:
     )
 
 
-def _tag(image_ref: str) -> str:
-    head, sep, tail = image_ref.rpartition(":")
-    return "" if (not sep or "/" in tail) else tail
-
-
 def _deployment_path(namespace: str, name: str) -> str:
     return f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
 
@@ -58,10 +53,10 @@ def running_version(settings: UpdaterSettings) -> str | None:
             return None
         resp.raise_for_status()
         containers = resp.json()["spec"]["template"]["spec"]["containers"]
-        for container in containers:
-            if container["name"] == settings.container_name:
-                return _tag(container["image"]) or None
-    return None
+    image = next((c["image"] for c in containers if c["name"] == settings.container_name), None)
+    if not image:
+        return None
+    return tag_of(image) or None
 
 
 def apply(settings: UpdaterSettings, image_ref: str) -> None:

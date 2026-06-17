@@ -19,7 +19,7 @@ class UpdaterSettings(BaseSettings):
     target_file: Path = Field(default=Path("/data/update-target.json"))
     poll_seconds: float = 30.0
 
-    # Fail-closed: refuse to apply an image whose signature we cannot verify. Turn this OFF
+    # fail-closed: refuse to apply an image whose signature we cannot verify. Turn this OFF
     # (ARES_UPDATE_REQUIRE_SIGNATURE=false) only for local/dev, before image signing is wired.
     require_signature: bool = True
     # cosign keyless verification (preferred): the expected signer identity + OIDC issuer.
@@ -34,6 +34,13 @@ class UpdaterSettings(BaseSettings):
 
     def image_for(self, version: str) -> str:
         return f"{self.image_repo}:{version}"
+
+
+def tag_of(image_ref: str) -> str:
+    """``ghcr.io/x/ares-agent:2.5.0`` -> ``2.5.0``; a ``:`` is a tag only when the tail has
+    no ``/`` (otherwise it is a registry port). Empty string when there is no tag."""
+    head, sep, tail = image_ref.rpartition(":")
+    return "" if (not sep or "/" in tail) else tail
 
 
 settings = UpdaterSettings()

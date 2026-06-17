@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from types import ModuleType
 
 from updater import dockerd, kube, verify
 from updater.config import settings
@@ -24,8 +25,11 @@ def _configure_logging() -> None:
     )
 
 
-def _pick_backend():
-    """k8s if we have a service account, else Docker if we have the socket, else None."""
+def _pick_backend() -> ModuleType | None:
+    """k8s if we have a service account, else Docker if we have the socket, else None.
+
+    A backend is a module exposing ``available()``, ``running_version(settings)`` and
+    ``apply(settings, image)`` (dockerd / kube)."""
     if kube.available():
         logger.info("kubernetes mode (patching the Deployment)")
         return kube
@@ -37,12 +41,17 @@ def _pick_backend():
 
 def _read_target() -> str | None:
     try:
-        return json.loads(settings.target_file.read_text()).get("version") or None
-    except (OSError, ValueError):
-        return None  # not written yet, or no update requested
+        raw = settings.target_file.read_text()
+    except OSError:
+        return None  # not written yet: no update is queued
+    try:
+        return json.loads(raw).get("version") or None
+    except ValueError:
+        logger.warning("ignoring malformed update target at %s", settings.target_file)
+        return None
 
 
-def _tick(backend) -> None:
+def _tick(backend: ModuleType) -> None:
     target = _read_target()
     if not target:
         return

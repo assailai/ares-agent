@@ -1,9 +1,9 @@
 # =============================================================================
 # Ares companion updater - keeps the agent on the version the server marks current.
 # =============================================================================
-# Single-purpose and small. It applies updates via the platform (Docker socket in docker
-# mode, the in-cluster API in k8s mode) and verifies the target image's cosign signature
-# before applying. The agent stays unprivileged; only this updater touches the runtime.
+# Applies updates via the platform (Docker socket in docker mode, the in-cluster API in k8s
+# mode) and verifies the target image's cosign signature before applying. The agent stays
+# unprivileged; only this updater touches the runtime.
 # =============================================================================
 FROM python:3.12-alpine
 
@@ -27,6 +27,6 @@ ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Runs as root: docker mode needs the socket (host-equivalent access by design, which is
-# why this component is small and single-purpose); k8s mode uses its ServiceAccount.
+# Runs as root: docker mode needs the socket (host-equivalent access by design); k8s mode
+# uses its ServiceAccount.
 ENTRYPOINT ["python", "-m", "updater.main"]

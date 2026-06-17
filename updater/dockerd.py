@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from updater.config import UpdaterSettings
+from updater.config import UpdaterSettings, tag_of
 
 logger = logging.getLogger("ares.updater.docker")
 
@@ -34,19 +34,13 @@ def _client() -> httpx.Client:
     )
 
 
-def _tag(image_ref: str) -> str:
-    """``ghcr.io/x/ares-agent:2.5.0`` -> ``2.5.0``; a ``:`` is a tag only when the tail has no ``/``."""
-    head, sep, tail = image_ref.rpartition(":")
-    return "" if (not sep or "/" in tail) else tail
-
-
 def running_version(settings: UpdaterSettings) -> str | None:
     with _client() as docker:
         resp = docker.get(f"/containers/{settings.container_name}/json")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return _tag(resp.json()["Config"]["Image"]) or None
+        return tag_of(resp.json()["Config"]["Image"]) or None
 
 
 def apply(settings: UpdaterSettings, image_ref: str) -> None:
@@ -67,17 +61,24 @@ def apply(settings: UpdaterSettings, image_ref: str) -> None:
         cid = created.json()["Id"]
         docker.post(f"/containers/{cid}/start").raise_for_status()
 
-        for _ in range(_VERIFY_CHECKS):
-            time.sleep(_VERIFY_INTERVAL)
-            if not _running(docker, cid):
-                logger.error("replacement did not stay up; aborting, the old agent keeps running")
-                docker.delete(f"/containers/{cid}", params={"force": "true"})
-                return
+        if not _stays_up(docker, cid):
+            logger.error("replacement did not stay up; aborting, the old agent keeps running")
+            docker.delete(f"/containers/{cid}", params={"force": "true"})
+            return
 
         # healthy: retire the old container and give its name to the replacement.
         docker.delete(f"/containers/{name}", params={"force": "true"})
         docker.post(f"/containers/{cid}/rename", params={"name": name})
         logger.info("updated %s to %s", name, image_ref)
+
+
+def _stays_up(docker: httpx.Client, cid: str) -> bool:
+    """True if the replacement keeps running across the verify window (not crash-looping)."""
+    for _ in range(_VERIFY_CHECKS):
+        time.sleep(_VERIFY_INTERVAL)
+        if not _running(docker, cid):
+            return False
+    return True
 
 
 def _pull(docker: httpx.Client, image_ref: str) -> None:

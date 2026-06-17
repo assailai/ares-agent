@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from updater import dockerd, kube, main, verify
-from updater.config import UpdaterSettings
+from updater.config import UpdaterSettings, tag_of
 
 
 def _settings(**over) -> UpdaterSettings:
@@ -16,9 +16,9 @@ def _settings(**over) -> UpdaterSettings:
 
 
 def test_tag_parsing_and_image_ref() -> None:
-    assert dockerd._tag("ghcr.io/assailai/ares-agent:2.5.0") == "2.5.0"
-    assert dockerd._tag("ghcr.io/assailai/ares-agent") == ""  # no tag
-    assert dockerd._tag("reg:5000/ares-agent") == ""  # registry port is not a tag
+    assert tag_of("ghcr.io/assailai/ares-agent:2.5.0") == "2.5.0"
+    assert tag_of("ghcr.io/assailai/ares-agent") == ""  # no tag
+    assert tag_of("reg:5000/ares-agent") == ""  # registry port is not a tag
     assert _settings().image_for("2.5.0") == "ghcr.io/assailai/ares-agent:2.5.0"
 
 
