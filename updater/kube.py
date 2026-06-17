@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from updater.config import UpdaterSettings, tag_of
+from updater.config import UpdaterSettings
 
 logger = logging.getLogger("ares.updater.k8s")
 
@@ -21,8 +21,43 @@ _SA = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 _TIMEOUT = 60.0
 
 
-def available() -> bool:
-    return bool(os.environ.get("KUBERNETES_SERVICE_HOST")) and (_SA / "token").exists()
+class K8sBackend:
+    def available(self) -> bool:
+        return bool(os.environ.get("KUBERNETES_SERVICE_HOST")) and (_SA / "token").exists()
+
+    def running_image(self, settings: UpdaterSettings) -> str | None:
+        namespace = _namespace(settings)
+        with _client() as kube:
+            resp = kube.get(_deployment_path(namespace, settings.container_name))
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            containers = resp.json()["spec"]["template"]["spec"]["containers"]
+        return next((c["image"] for c in containers if c["name"] == settings.container_name), None)
+
+    def apply(self, settings: UpdaterSettings, image_ref: str) -> None:
+        namespace = _namespace(settings)
+        # strategic-merge patch: set only the agent container's image; k8s rolls the Deployment.
+        patch = {
+            "spec": {
+                "template": {
+                    "spec": {"containers": [{"name": settings.container_name, "image": image_ref}]}
+                }
+            }
+        }
+        with _client() as kube:
+            resp = kube.patch(
+                _deployment_path(namespace, settings.container_name),
+                json=patch,
+                headers={"Content-Type": "application/strategic-merge-patch+json"},
+            )
+            resp.raise_for_status()
+        logger.info(
+            "patched Deployment %s/%s image to %s; kubernetes will roll it out",
+            namespace,
+            settings.container_name,
+            image_ref,
+        )
 
 
 def _namespace(settings: UpdaterSettings) -> str:
@@ -43,42 +78,3 @@ def _client() -> httpx.Client:
 
 def _deployment_path(namespace: str, name: str) -> str:
     return f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
-
-
-def running_version(settings: UpdaterSettings) -> str | None:
-    namespace = _namespace(settings)
-    with _client() as kube:
-        resp = kube.get(_deployment_path(namespace, settings.container_name))
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        containers = resp.json()["spec"]["template"]["spec"]["containers"]
-    image = next((c["image"] for c in containers if c["name"] == settings.container_name), None)
-    if not image:
-        return None
-    return tag_of(image) or None
-
-
-def apply(settings: UpdaterSettings, image_ref: str) -> None:
-    namespace = _namespace(settings)
-    # strategic-merge patch: set only the agent container's image; k8s rolls the Deployment.
-    patch = {
-        "spec": {
-            "template": {
-                "spec": {"containers": [{"name": settings.container_name, "image": image_ref}]}
-            }
-        }
-    }
-    with _client() as kube:
-        resp = kube.patch(
-            _deployment_path(namespace, settings.container_name),
-            json=patch,
-            headers={"Content-Type": "application/strategic-merge-patch+json"},
-        )
-        resp.raise_for_status()
-    logger.info(
-        "patched Deployment %s/%s image to %s; kubernetes will roll it out",
-        namespace,
-        settings.container_name,
-        image_ref,
-    )

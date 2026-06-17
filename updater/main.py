@@ -10,12 +10,17 @@ from __future__ import annotations
 import json
 import logging
 import time
-from types import ModuleType
 
-from updater import dockerd, kube, verify
-from updater.config import settings
+from updater import verify
+from updater.backend import Backend
+from updater.config import repo_of, settings, tag_of
+from updater.dockerd import DockerBackend
+from updater.kube import K8sBackend
 
 logger = logging.getLogger("ares.updater")
+
+# k8s wins if both somehow look available (e.g. a socket mounted inside a pod).
+_BACKENDS: list[Backend] = [K8sBackend(), DockerBackend()]
 
 
 def _configure_logging() -> None:
@@ -25,18 +30,8 @@ def _configure_logging() -> None:
     )
 
 
-def _pick_backend() -> ModuleType | None:
-    """k8s if we have a service account, else Docker if we have the socket, else None.
-
-    A backend is a module exposing ``available()``, ``running_version(settings)`` and
-    ``apply(settings, image)`` (dockerd / kube)."""
-    if kube.available():
-        logger.info("kubernetes mode (patching the Deployment)")
-        return kube
-    if dockerd.available():
-        logger.info("docker mode (recreating the container)")
-        return dockerd
-    return None
+def _pick_backend() -> Backend | None:
+    return next((backend for backend in _BACKENDS if backend.available()), None)
 
 
 def _read_target() -> str | None:
@@ -51,15 +46,26 @@ def _read_target() -> str | None:
         return None
 
 
-def _tick(backend: ModuleType) -> None:
+def _target_image(backend: Backend, target_version: str) -> str | None:
+    """The image to move to, or None if there is nothing to do (no agent yet / already there).
+
+    The repo is derived from the running agent's image, so the updater can only pull a new tag
+    of the same image the agent already runs (ARES_UPDATE_IMAGE_REPO overrides it)."""
+    running = backend.running_image(settings)
+    if running is None or tag_of(running) == target_version:
+        return None
+    repo = settings.image_repo or repo_of(running)
+    return f"{repo}:{target_version}"
+
+
+def _tick(backend: Backend) -> None:
     target = _read_target()
     if not target:
         return
-    running = backend.running_version(settings)
-    if running == target:
+    image = _target_image(backend, target)
+    if image is None:
         return
-    image = settings.image_for(target)
-    logger.info("update requested: running=%s target=%s (%s)", running, target, image)
+    logger.info("update requested: target %s (%s)", target, image)
     if not verify.verify(image, settings):
         return  # fail-closed: leave the agent on its current version
     backend.apply(settings, image)
@@ -74,7 +80,10 @@ def main() -> None:
         )
         raise SystemExit(1)
     logger.info(
-        "ares-updater watching %s (every %ss)", settings.container_name, settings.poll_seconds
+        "%s watching %s (every %ss)",
+        type(backend).__name__,
+        settings.container_name,
+        settings.poll_seconds,
     )
     while True:
         try:

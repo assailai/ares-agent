@@ -13,8 +13,9 @@ class UpdaterSettings(BaseSettings):
 
     # the agent container (docker) / Deployment + container (k8s) this updater keeps current.
     container_name: str = "ares-agent"
-    # the registry/repo the agent image lives in; the target version tag is appended.
-    image_repo: str = "ghcr.io/assailai/ares-agent"
+    # optional override for the registry/repo; empty means derive it from the running agent's
+    # image so the updater can never pull from a different repo than the agent was deployed from.
+    image_repo: str = ""
     # shared with the agent: the agent writes the desired version here, the updater reads it.
     target_file: Path = Field(default=Path("/data/update-target.json"))
     poll_seconds: float = 30.0
@@ -32,15 +33,22 @@ class UpdaterSettings(BaseSettings):
     k8s_namespace: str = ""
     log_level: str = "INFO"
 
-    def image_for(self, version: str) -> str:
-        return f"{self.image_repo}:{version}"
+
+def _split_ref(image_ref: str) -> tuple[str, str]:
+    """Split an image ref into (repo, tag). A trailing ``:`` is a tag only when what follows
+    has no ``/`` (otherwise it is a registry port, e.g. ``reg:5000/img``)."""
+    head, sep, tail = image_ref.rpartition(":")
+    return (head, tail) if (sep and "/" not in tail) else (image_ref, "")
 
 
 def tag_of(image_ref: str) -> str:
-    """``ghcr.io/x/ares-agent:2.5.0`` -> ``2.5.0``; a ``:`` is a tag only when the tail has
-    no ``/`` (otherwise it is a registry port). Empty string when there is no tag."""
-    head, sep, tail = image_ref.rpartition(":")
-    return "" if (not sep or "/" in tail) else tail
+    """``ghcr.io/x/ares-agent:2.5.0`` -> ``2.5.0``; empty string when there is no tag."""
+    return _split_ref(image_ref)[1]
+
+
+def repo_of(image_ref: str) -> str:
+    """``ghcr.io/x/ares-agent:2.5.0`` -> ``ghcr.io/x/ares-agent`` (drops the tag if present)."""
+    return _split_ref(image_ref)[0]
 
 
 settings = UpdaterSettings()

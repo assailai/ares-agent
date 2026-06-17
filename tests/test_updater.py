@@ -1,4 +1,4 @@
-"""Companion updater: tag parsing, target read, the signature gate, and the apply backends."""
+"""Companion updater: image-ref parsing, target read, the signature gate, and the backends."""
 
 from __future__ import annotations
 
@@ -8,18 +8,20 @@ import httpx
 import pytest
 
 from updater import dockerd, kube, main, verify
-from updater.config import UpdaterSettings, tag_of
+from updater.config import UpdaterSettings, repo_of, tag_of
+from updater.dockerd import DockerBackend
+from updater.kube import K8sBackend
 
 
 def _settings(**over) -> UpdaterSettings:
     return UpdaterSettings(require_signature=False, **over)
 
 
-def test_tag_parsing_and_image_ref() -> None:
+def test_image_ref_parsing() -> None:
     assert tag_of("ghcr.io/assailai/ares-agent:2.5.0") == "2.5.0"
+    assert repo_of("ghcr.io/assailai/ares-agent:2.5.0") == "ghcr.io/assailai/ares-agent"
     assert tag_of("ghcr.io/assailai/ares-agent") == ""  # no tag
-    assert tag_of("reg:5000/ares-agent") == ""  # registry port is not a tag
-    assert _settings().image_for("2.5.0") == "ghcr.io/assailai/ares-agent:2.5.0"
+    assert repo_of("reg:5000/ares-agent") == "reg:5000/ares-agent"  # the ":" is a registry port
 
 
 def test_read_target(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,6 +30,8 @@ def test_read_target(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert main._read_target() is None  # not written yet
     target.write_text('{"version": "2.5.0"}')
     assert main._read_target() == "2.5.0"
+    target.write_text("not json")  # malformed is ignored, not crashed on
+    assert main._read_target() is None
 
 
 def test_verify_gate() -> None:
@@ -36,13 +40,13 @@ def test_verify_gate() -> None:
     assert verify.verify("img:1", UpdaterSettings(require_signature=True)) is False
 
 
-def test_docker_running_version(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_docker_running_image(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"Config": {"Image": "ghcr.io/assailai/ares-agent:2.4.0"}})
 
     client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://docker")
     monkeypatch.setattr(dockerd, "_client", lambda: client)
-    assert dockerd.running_version(_settings()) == "2.4.0"
+    assert DockerBackend().running_image(_settings()) == "ghcr.io/assailai/ares-agent:2.4.0"
 
 
 def test_docker_apply_verifies_new_then_swaps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,7 +65,7 @@ def test_docker_apply_verifies_new_then_swaps(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(dockerd.time, "sleep", lambda _s: None)
     monkeypatch.setattr(dockerd, "_VERIFY_CHECKS", 1)
 
-    dockerd.apply(_settings(), "ghcr.io/assailai/ares-agent:2.5.0")
+    DockerBackend().apply(_settings(), "ghcr.io/assailai/ares-agent:2.5.0")
 
     # pulled, created the replacement, started it, then removed the old and renamed the new in.
     assert ("POST", "/images/create") in calls
@@ -77,29 +81,45 @@ def test_k8s_apply_patches_the_deployment_image(monkeypatch: pytest.MonkeyPatch)
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "PATCH":
             seen["body"] = request.read().decode()
-            return httpx.Response(200, json={})
         return httpx.Response(200, json={})
 
     client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://k8s")
     monkeypatch.setattr(kube, "_client", lambda: client)
     monkeypatch.setattr(kube, "_namespace", lambda _s: "default")
 
-    kube.apply(_settings(), "ghcr.io/assailai/ares-agent:2.5.0")
+    K8sBackend().apply(_settings(), "ghcr.io/assailai/ares-agent:2.5.0")
     container = json.loads(seen["body"])["spec"]["template"]["spec"]["containers"][0]
     assert container == {"name": "ares-agent", "image": "ghcr.io/assailai/ares-agent:2.5.0"}
 
 
-def test_tick_applies_only_on_verified_drift(monkeypatch: pytest.MonkeyPatch) -> None:
-    applied: list[str] = []
+class _FakeBackend:
+    """Stand-in backend that records what it was asked to apply."""
 
-    class _Backend:
-        def running_version(self, _s) -> str:
-            return "2.4.0"
+    def __init__(self, running: str | None) -> None:
+        self.running = running
+        self.applied: str | None = None
 
-        def apply(self, _s, image: str) -> None:
-            applied.append(image)
+    def available(self) -> bool:
+        return True
 
+    def running_image(self, settings: UpdaterSettings) -> str | None:
+        return self.running
+
+    def apply(self, settings: UpdaterSettings, image_ref: str) -> None:
+        self.applied = image_ref
+
+
+def test_tick_derives_repo_from_the_running_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "settings", _settings())  # image_repo unset -> derive
+    monkeypatch.setattr(main, "_read_target", lambda: "2.5.0")
+    backend = _FakeBackend(running="ghcr.io/assailai/ares-agent:2.4.0")
+    main._tick(backend)
+    assert backend.applied == "ghcr.io/assailai/ares-agent:2.5.0"
+
+
+def test_tick_noop_when_already_on_target(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "settings", _settings())
     monkeypatch.setattr(main, "_read_target", lambda: "2.5.0")
-    main._tick(_Backend())
-    assert applied == ["ghcr.io/assailai/ares-agent:2.5.0"]
+    backend = _FakeBackend(running="ghcr.io/assailai/ares-agent:2.5.0")
+    main._tick(backend)
+    assert backend.applied is None
