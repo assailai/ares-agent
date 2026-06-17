@@ -44,13 +44,16 @@ single agent.
 
 ### Option A: Docker run
 
+Pin to a specific version (the dashboard's deploy command shows the current release under
+Settings -> Agents); avoid `:latest` so deploys are reproducible.
+
 ```bash
 docker run -d --name ares-agent \
   --platform linux/amd64 \
   -e ARES_TOKEN=<your-registration-token> \
   -v ares-agent-data:/data \
   --restart unless-stopped \
-  ghcr.io/assailai/ares-agent:latest
+  ghcr.io/assailai/ares-agent:<version>
 ```
 
 Watch it enroll and come online:
@@ -61,7 +64,7 @@ docker logs -f ares-agent
 # ... Agent online, visible in the dashboard as "<name>".
 ```
 
-The image is also published on Docker Hub as `assailai/ares-agent:latest`.
+The image is also published on Docker Hub as `assailai/ares-agent`, tagged per release.
 
 ### Option B: Docker Compose
 
@@ -128,7 +131,7 @@ spec:
     spec:
       containers:
       - name: ares-agent
-        image: ghcr.io/assailai/ares-agent:latest
+        image: ghcr.io/assailai/ares-agent:<version>  # pin to a release; update via the Deployment
         envFrom:
         - secretRef:
             name: ares-agent

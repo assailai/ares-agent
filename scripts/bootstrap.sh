@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-IMAGE="${ARES_IMAGE:-ghcr.io/assailai/ares-agent:latest}"
+# Pin a release with ARES_VERSION=2.4.0 (recommended); defaults to latest for a quick start.
+IMAGE="${ARES_IMAGE:-ghcr.io/assailai/ares-agent:${ARES_VERSION:-latest}}"
 CONTAINER_NAME="ares-agent"
 VOLUME_NAME="ares-agent-data"
 ONLINE_TIMEOUT=120
