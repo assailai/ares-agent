@@ -215,34 +215,27 @@ docker pull ghcr.io/assailai/ares-agent:<new-version>
 
 Or with Compose: bump the pinned `image:` tag, then `docker compose pull && docker compose up -d`.
 
-### Self-update (optional)
+### Auto-update (the companion updater)
 
-By default upgrades are manual (above): the dashboard surfaces version drift and you redeploy. If
-you want a dashboard "Update" to apply itself, opt in with `ARES_SELF_UPDATE=true` and mount the
-Docker socket:
+The deployment bundles a small `ares-updater` companion that keeps the agent on the version you
+mark current in the dashboard. The **agent stays unprivileged**; only the updater holds the
+platform access, verifies the target image's signature, and applies it:
 
-```bash
-docker run -d --name ares-agent \
-  --platform linux/amd64 \
-  -e ARES_TOKEN=<your-registration-token> \
-  -e ARES_SELF_UPDATE=true \
-  -v ares-agent-data:/data \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  --restart unless-stopped \
-  ghcr.io/assailai/ares-agent:<version>
-```
+- **Docker Compose** (`docker-compose.yml`): the `ares-updater` service holds the Docker socket
+  and recreates the agent container on the new version, verify-then-swap (the replacement is
+  confirmed up before the old container is removed, so a bad version never takes the agent down).
+- **Kubernetes** (`deploy/k8s/ares-agent.yaml`): the updater runs as a sidecar with a
+  ServiceAccount scoped to patch only the agent Deployment, triggering a native rolling update.
 
-When the dashboard marks a new release current and you queue an update, the agent launches a
-short-lived helper that recreates this container on that pinned version. The swap is fail-safe:
-the replacement is verified up before the old container is removed, so a bad version never takes
-the agent down. Notes:
+Notes:
 
-- **The Docker socket grants host-level access.** Only enable self-update if that tradeoff is
-  acceptable on the host.
 - The agent moves to the exact version the dashboard marks current (a pinned tag), so rollouts
-  are deterministic and you can promote a version across environments.
-- **Kubernetes:** do not use this; update the Deployment image instead (`kubectl set image` or your
-  GitOps pipeline).
+  are deterministic and promotable across environments.
+- Verification is **fail-closed** (`ARES_UPDATE_REQUIRE_SIGNATURE=true`): the updater refuses an
+  image it cannot cosign-verify. Set it `false` only for local/dev, before image signing is wired.
+- Only the updater touches the runtime (the Docker socket, or the scoped k8s RBAC); the agent has
+  neither. To disable auto-update, remove the updater service/sidecar and update the image
+  yourself (`docker compose pull && docker compose up -d`, or your GitOps pipeline).
 
 ## Troubleshooting
 
