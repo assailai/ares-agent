@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-# Pin a release with ARES_VERSION=2.4.0 (recommended); defaults to latest for a quick start.
-IMAGE="${ARES_IMAGE:-ghcr.io/assailai/ares-agent:${ARES_VERSION:-latest}}"
+# Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
+IMAGE="${ARES_IMAGE:-ghcr.io/assailai/ares-agent:${ARES_VERSION:-2.4.0}}"
 CONTAINER_NAME="ares-agent"
 VOLUME_NAME="ares-agent-data"
 ONLINE_TIMEOUT=120
@@ -82,7 +82,7 @@ start_container() {
     step "Starting the agent"
     replace_existing_container
 
-    local run_args=(-d --name "$CONTAINER_NAME" --platform linux/amd64 -e "ARES_TOKEN=$TOKEN")
+    local run_args=(-d --name "$CONTAINER_NAME" -e "ARES_TOKEN=$TOKEN")
     local var
     for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE; do
         [ -n "${!var:-}" ] && run_args+=(-e "$var=${!var}")
