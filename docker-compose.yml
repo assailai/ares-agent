@@ -7,6 +7,10 @@
 #   docker compose logs -f            # watch it enroll and come online
 #
 # Outbound-only (HTTPS + WebSocket to ares); no published ports, no extra capabilities.
+# The ares-updater companion keeps the agent on the version the dashboard marks current
+# (a dashboard "Update" recreates the agent on the new, signed image). Only the updater
+# holds the Docker socket; the agent stays unprivileged. To opt out of auto-update, remove
+# the ares-updater service.
 # =============================================================================
 
 services:
@@ -17,16 +21,25 @@ services:
     hostname: ares-agent
     volumes:
       - ares-agent-data:/data
-      # Opt-in self-update needs the Docker socket (uncomment with ARES_SELF_UPDATE below).
-      # The socket grants host-level access; enable only if you accept that.
-      # - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token from the dashboard}
       # - ARES_URL=https://api.assailai.com        # override when self-hosting
       # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override LAN auto-detection
-      # A dashboard "Update" then recreates this container on the version the dashboard marks
-      # current (a pinned tag), fail-safe: the new one is verified up before the old is removed.
-      # - ARES_SELF_UPDATE=true
+    restart: unless-stopped
+
+  ares-updater:
+    image: ghcr.io/assailai/ares-updater:2.4.0
+    platform: linux/amd64
+    container_name: ares-updater
+    volumes:
+      - ares-agent-data:/data:ro                  # reads the agent's update-target.json
+      - /var/run/docker.sock:/var/run/docker.sock  # recreates the agent on a new version
+    environment:
+      # Fail-closed: verify the image signature before applying. Set false ONLY for local
+      # dev until image signing is wired; in production set the cosign identity/issuer instead.
+      - ARES_UPDATE_REQUIRE_SIGNATURE=true
+      # - ARES_UPDATE_COSIGN_IDENTITY=https://github.com/assailai/ares-agent/.github/workflows/release.yml@refs/tags/*
+      # - ARES_UPDATE_COSIGN_ISSUER=https://token.actions.githubusercontent.com
     restart: unless-stopped
 
 volumes:

@@ -33,12 +33,6 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("/data"))
     agent_version: str = "2.4.0"
 
-    # Self-update (opt-in): on a dashboard-queued upgrade, recreate this container on the
-    # version the dashboard marks current (a pinned tag), via a short-lived updater helper.
-    # Needs the Docker socket mounted, which grants host-level access, so it is off by default.
-    self_update: bool = False
-    container_name: str = "ares-agent"
-
     @property
     def base_url(self) -> str:
         return self.url.rstrip("/")
@@ -46,6 +40,11 @@ class Settings(BaseSettings):
     @property
     def state_path(self) -> Path:
         return self.data_dir / "agent-state.json"
+
+    @property
+    def update_target_path(self) -> Path:
+        # the companion updater reads this from the shared data dir; the agent only writes it.
+        return self.data_dir / "update-target.json"
 
     def network_overrides(self) -> list[str]:
         return [n.strip() for n in self.networks.split(",") if n.strip()]

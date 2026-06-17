@@ -1,0 +1,32 @@
+# =============================================================================
+# Ares companion updater - keeps the agent on the version the server marks current.
+# =============================================================================
+# Single-purpose and small. It applies updates via the platform (Docker socket in docker
+# mode, the in-cluster API in k8s mode) and verifies the target image's cosign signature
+# before applying. The agent stays unprivileged; only this updater touches the runtime.
+# =============================================================================
+FROM python:3.12-alpine
+
+LABEL org.opencontainers.image.title="Ares Updater"
+LABEL org.opencontainers.image.source="https://github.com/assailai/ares-agent"
+LABEL org.opencontainers.image.vendor="Assail AI"
+
+# cosign verifies the target image's signature (the root of trust) before applying. It is a
+# static binary, so it runs on alpine. (Pin a release tag in CI; latest is fine for dev.)
+RUN apk add --no-cache curl \
+    && curl -fsSL -o /usr/local/bin/cosign \
+       https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+    && chmod +x /usr/local/bin/cosign \
+    && apk del curl \
+    && pip install --no-cache-dir httpx pydantic-settings \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+COPY updater/ ./updater/
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Runs as root: docker mode needs the socket (host-equivalent access by design, which is
+# why this component is small and single-purpose); k8s mode uses its ServiceAccount.
+ENTRYPOINT ["python", "-m", "updater.main"]
