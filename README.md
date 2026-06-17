@@ -210,6 +210,34 @@ docker pull ghcr.io/assailai/ares-agent:latest
 
 Or with Compose: `docker compose pull && docker compose up -d`.
 
+### Self-update (optional)
+
+By default upgrades are manual (above): the dashboard surfaces version drift and you redeploy. If
+you want a dashboard "Update" to apply itself, opt in with `ARES_SELF_UPDATE=true` and mount the
+Docker socket:
+
+```bash
+docker run -d --name ares-agent \
+  --platform linux/amd64 \
+  -e ARES_TOKEN=<your-registration-token> \
+  -e ARES_SELF_UPDATE=true \
+  -v ares-agent-data:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --restart unless-stopped \
+  ghcr.io/assailai/ares-agent:latest
+```
+
+When the dashboard queues an update, the agent launches a one-shot
+[Watchtower](https://containrrr.dev/watchtower/) that pulls the image and recreates this container
+with the same configuration. Notes:
+
+- **The Docker socket grants host-level access.** Only enable self-update if that tradeoff is
+  acceptable on the host.
+- Self-update tracks the **running image tag**, so keep the agent on a moving tag like `:latest`
+  for new releases to be picked up.
+- **Kubernetes:** do not use this; update the Deployment image instead (`kubectl set image` or your
+  GitOps pipeline).
+
 ## Troubleshooting
 
 Start with the logs: `docker logs ares-agent`. The agent narrates each step.

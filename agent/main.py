@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agent import control_plane, netdetect, scan
+from agent import control_plane, netdetect, scan, selfupdate
 from agent.config import settings
 from agent.state import AgentState, load_state, save_state
 from agent.tunnel import TunnelManager, tunnel_url
@@ -68,8 +68,24 @@ def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
         logger.debug("%s failed (attempt %d): %s", what, failures, exc)
 
 
+async def _handle_update_pending(latest_version: str | None) -> bool:
+    """An upgrade is queued: self-update if enabled, else tell the operator to redeploy.
+    Returns True once handled so the agent does not act on the same signal every beat."""
+    if settings.self_update:
+        logger.info("Update to %s is queued; starting self-update.", latest_version)
+        await selfupdate.trigger_self_update(settings)
+        return True
+    logger.warning(
+        "Update to %s is queued. Self-update is off, so redeploy the container to apply it "
+        "(docker compose pull && up -d, or re-run the docker run command).",
+        latest_version,
+    )
+    return True
+
+
 async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
     failures = 0
+    update_handled = False
     while True:
         try:
             resp = await control_plane.heartbeat(settings, state.agent_token or "")
@@ -81,11 +97,8 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
             if resp.get("restart_requested"):
                 logger.warning("Restart requested from dashboard; exiting for container restart.")
                 os._exit(0)
-            if resp.get("update_pending"):
-                logger.info(
-                    "Update queued (latest=%s); self-update is not wired in this build.",
-                    resp.get("latest_version"),
-                )
+            if resp.get("update_pending") and not update_handled:
+                update_handled = await _handle_update_pending(resp.get("latest_version"))
         except asyncio.CancelledError:
             raise
         except httpx.HTTPStatusError as exc:

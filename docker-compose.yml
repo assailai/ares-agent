@@ -17,10 +17,16 @@ services:
     hostname: ares-agent
     volumes:
       - ares-agent-data:/data
+      # Opt-in self-update needs the Docker socket (uncomment with ARES_SELF_UPDATE below).
+      # The socket grants host-level access; enable only if you accept that.
+      # - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token from the dashboard}
       # - ARES_URL=https://api.assailai.com        # override when self-hosting
       # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override LAN auto-detection
+      # A dashboard "Update" recreates this container on the new image (one-shot Watchtower).
+      # Keep the image on :latest so it picks up new releases.
+      # - ARES_SELF_UPDATE=true
     restart: unless-stopped
 
 volumes:

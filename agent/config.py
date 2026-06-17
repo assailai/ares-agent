@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("/data"))
     agent_version: str = "2.4.0"
 
+    # Self-update (opt-in): on a dashboard-queued upgrade, recreate this container on the
+    # new image via a one-shot Watchtower. Needs the Docker socket mounted, which grants
+    # host-level access, so it is off by default. Tracks the running image tag, so deploy
+    # with a moving tag like :latest for upgrades to be picked up.
+    self_update: bool = False
+    container_name: str = "ares-agent"
+    watchtower_image: str = "containrrr/watchtower:latest"
+
     @property
     def base_url(self) -> str:
         return self.url.rstrip("/")
