@@ -70,12 +70,21 @@ async def heartbeat(
     *,
     public_ip: str | None = None,
     last_handshake_at: str | None = None,
+    cpu_percent: float | None = None,
+    memory_percent: float | None = None,
+    uptime_seconds: int | None = None,
 ) -> dict:
     body: dict[str, object] = {"agent_version": settings.agent_version}
     if public_ip is not None:
         body["public_ip"] = public_ip
     if last_handshake_at is not None:
         body["last_handshake_at"] = last_handshake_at
+    if cpu_percent is not None:
+        body["cpu_percent"] = cpu_percent
+    if memory_percent is not None:
+        body["memory_percent"] = memory_percent
+    if uptime_seconds is not None:
+        body["uptime_seconds"] = uptime_seconds
     async with _client(settings) as client:
         resp = await client.post("/api/v1/agent/heartbeat", json=body, headers=_auth(token))
     resp.raise_for_status()

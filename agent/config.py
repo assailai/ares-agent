@@ -11,6 +11,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agent.__version__ import __version__
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -31,7 +33,8 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     data_dir: Path = Field(default=Path("/data"))
-    agent_version: str = "2.4.0"
+    # single source of truth lives in agent/__version__.py
+    agent_version: str = Field(default=__version__)
 
     @property
     def base_url(self) -> str:

@@ -14,12 +14,14 @@ import json
 import logging
 import os
 import sys
+import time
 from urllib.parse import urlparse
 
 import httpx
 
 from agent import control_plane, netdetect, scan
 from agent.config import settings
+from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.state import AgentState, load_state, save_state
 from agent.tunnel import TunnelManager, tunnel_url
 
@@ -32,6 +34,8 @@ _REGISTER_RETRY_SECONDS = 10
 _INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 # cadence the server hands back at register / heartbeat (sane defaults until then).
 _cadence = {"heartbeat": 30, "poll": 5}
+# captured at import (process start) so heartbeats can report uptime since connect.
+_AGENT_START_MONOTONIC = time.monotonic()
 
 
 def _configure_logging() -> None:
@@ -90,7 +94,15 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
     failures = 0
     while True:
         try:
-            resp = await control_plane.heartbeat(settings, state.agent_token or "")
+            # CPU sampling reads the cgroup counter twice on the first call; keep it off the loop.
+            cpu_percent = await asyncio.to_thread(read_cpu_percent)
+            resp = await control_plane.heartbeat(
+                settings,
+                state.agent_token or "",
+                cpu_percent=cpu_percent,
+                memory_percent=read_memory_percent(),
+                uptime_seconds=int(time.monotonic() - _AGENT_START_MONOTONIC),
+            )
             if failures:
                 logger.info("Heartbeat recovered after %d failed attempt(s).", failures)
                 failures = 0
