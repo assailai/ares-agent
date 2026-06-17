@@ -200,15 +200,17 @@ whatever ports your hunt targets (commonly 80, 443, 8080, 8443).
 
 ## Upgrading
 
-The `/data` volume holds the agent's identity, so an upgrade is a pull and re-create:
+Pin the agent to a specific version (the current release is shown in the Ares dashboard under
+Settings -> Agents) rather than a moving tag, so deploys are reproducible. The `/data` volume
+holds the agent's identity, so an upgrade is a pull and re-create on the new tag:
 
 ```bash
 docker rm -f ares-agent
-docker pull ghcr.io/assailai/ares-agent:latest
-# re-run the docker run command from Getting started (the volume is reused)
+docker pull ghcr.io/assailai/ares-agent:<new-version>
+# re-run the docker run command from Getting started with the new tag (the volume is reused)
 ```
 
-Or with Compose: `docker compose pull && docker compose up -d`.
+Or with Compose: bump the pinned `image:` tag, then `docker compose pull && docker compose up -d`.
 
 ### Self-update (optional)
 
@@ -224,17 +226,18 @@ docker run -d --name ares-agent \
   -v ares-agent-data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --restart unless-stopped \
-  ghcr.io/assailai/ares-agent:latest
+  ghcr.io/assailai/ares-agent:<version>
 ```
 
-When the dashboard queues an update, the agent launches a one-shot
-[Watchtower](https://containrrr.dev/watchtower/) that pulls the image and recreates this container
-with the same configuration. Notes:
+When the dashboard marks a new release current and you queue an update, the agent launches a
+short-lived helper that recreates this container on that pinned version. The swap is fail-safe:
+the replacement is verified up before the old container is removed, so a bad version never takes
+the agent down. Notes:
 
 - **The Docker socket grants host-level access.** Only enable self-update if that tradeoff is
   acceptable on the host.
-- Self-update tracks the **running image tag**, so keep the agent on a moving tag like `:latest`
-  for new releases to be picked up.
+- The agent moves to the exact version the dashboard marks current (a pinned tag), so rollouts
+  are deterministic and you can promote a version across environments.
 - **Kubernetes:** do not use this; update the Deployment image instead (`kubectl set image` or your
   GitOps pipeline).
 

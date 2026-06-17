@@ -1,14 +1,13 @@
 """Optional dashboard-driven self-update (requires the Docker socket).
 
-When the dashboard queues an upgrade and ``ARES_SELF_UPDATE`` is on, the agent launches a
-one-shot Watchtower container that pulls the agent's image and recreates this container
-with the same configuration. Watchtower does the swap (config replay, restart policy,
-rollback on a failed pull) so we do not hand-roll container recreation, which is the part
-that could leave a remote agent down.
+When the dashboard marks a target version and queues an upgrade, and ``ARES_SELF_UPDATE``
+is on, the agent launches a short-lived updater container (its own image, running
+``agent.updater``) that recreates this container on the pinned target tag. The swap is
+fail-safe: the replacement is verified up before the old container is removed, so a bad
+version never takes the agent down (see ``agent/updater.py``).
 
-Self-update tracks the running image tag, so deploy with a moving tag (e.g. ``:latest``)
-for new releases to be picked up. Not for Kubernetes: update the Deployment image there.
-The socket grants host-level access, hence opt-in.
+The socket grants host-level access, hence opt-in. Not for Kubernetes: update the
+Deployment image there instead.
 """
 
 from __future__ import annotations
@@ -23,19 +22,18 @@ from agent.config import Settings
 logger = logging.getLogger("ares.agent.selfupdate")
 
 _DOCKER_SOCK = Path("/var/run/docker.sock")
-# the Docker image-pull stream can be slow on first use; give it room.
-_DOCKER_TIMEOUT = 180.0
+_DOCKER_TIMEOUT = 60.0
 
 
 def socket_available() -> bool:
     return _DOCKER_SOCK.exists()
 
 
-async def trigger_self_update(settings: Settings) -> bool:
-    """Launch a one-shot Watchtower to recreate this container on the new image.
+async def trigger_self_update(settings: Settings, target_version: str) -> bool:
+    """Launch the updater that recreates this container on ``target_version``.
 
-    Best-effort: returns True if the helper was launched, False otherwise (always logged).
-    Call this once per queued upgrade; a successful run replaces this container."""
+    Best-effort: returns True if the updater was launched, False otherwise (always logged).
+    Call once per queued upgrade; a successful run replaces this container."""
     if not socket_available():
         logger.error(
             "Self-update is enabled but %s is not mounted, so the agent cannot update "
@@ -43,29 +41,47 @@ async def trigger_self_update(settings: Settings) -> bool:
             _DOCKER_SOCK,
         )
         return False
+    if not target_version:
+        logger.warning("Update queued but no target version was provided; not self-updating.")
+        return False
     transport = httpx.AsyncHTTPTransport(uds=str(_DOCKER_SOCK))
     try:
         async with httpx.AsyncClient(
             transport=transport, base_url="http://docker", timeout=_DOCKER_TIMEOUT
         ) as docker:
-            await _launch_watchtower(docker, settings)
+            base_image = await _own_image(docker, settings.container_name)
+            await _launch_updater(docker, settings.container_name, target_version, base_image)
     except (httpx.HTTPError, OSError, KeyError) as exc:
         logger.error("Could not launch the self-update helper: %s", exc)
         return False
     logger.info(
-        "Self-update launched: Watchtower will pull and recreate %s on the new image. "
-        "This container will be replaced.",
-        settings.container_name,
+        "Self-update to %s launched; this container is replaced once the new one is healthy.",
+        target_version,
     )
     return True
 
 
-async def _launch_watchtower(docker: httpx.AsyncClient, settings: Settings) -> None:
-    """Pull Watchtower, then create + start it as a one-shot updater for our container."""
-    await _pull_image(docker, settings.watchtower_image)
+async def _own_image(docker: httpx.AsyncClient, container: str) -> str:
+    resp = await docker.get(f"/containers/{container}/json")
+    resp.raise_for_status()
+    return resp.json()["Config"]["Image"]
+
+
+async def _launch_updater(
+    docker: httpx.AsyncClient, container: str, target_version: str, base_image: str
+) -> None:
+    """Create + start the one-shot updater from the agent's own image.
+
+    Entrypoint is overridden so the helper runs the updater rather than the agent; it gets
+    the socket and the swap parameters, and removes itself when done."""
     body = {
-        "Image": settings.watchtower_image,
-        "Cmd": ["--run-once", settings.container_name],
+        "Image": base_image,
+        "Entrypoint": ["python", "-m", "agent.updater"],
+        "Env": [
+            f"ARES_UPDATE_CONTAINER={container}",
+            f"ARES_UPDATE_TARGET={target_version}",
+            f"ARES_UPDATE_BASE_IMAGE={base_image}",
+        ],
         "HostConfig": {
             "Binds": [f"{_DOCKER_SOCK}:{_DOCKER_SOCK}"],
             "AutoRemove": True,
@@ -76,13 +92,3 @@ async def _launch_watchtower(docker: httpx.AsyncClient, settings: Settings) -> N
     container_id = created.json()["Id"]
     started = await docker.post(f"/containers/{container_id}/start")
     started.raise_for_status()
-
-
-async def _pull_image(docker: httpx.AsyncClient, image: str) -> None:
-    repo, _, tag = image.rpartition(":")
-    if not repo:  # the ref carried no tag
-        repo, tag = image, "latest"
-    # the response body is a progress stream; reading it to completion finishes the pull.
-    resp = await docker.post("/images/create", params={"fromImage": repo, "tag": tag})
-    resp.raise_for_status()
-    _ = resp.text

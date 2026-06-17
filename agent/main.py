@@ -73,7 +73,7 @@ async def _handle_update_pending(latest_version: str | None) -> bool:
     Returns True once handled so the agent does not act on the same signal every beat."""
     if settings.self_update:
         logger.info("Update to %s is queued; starting self-update.", latest_version)
-        await selfupdate.trigger_self_update(settings)
+        await selfupdate.trigger_self_update(settings, latest_version or "")
         return True
     logger.warning(
         "Update to %s is queued. Self-update is off, so redeploy the container to apply it "
