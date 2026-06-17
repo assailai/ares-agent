@@ -49,7 +49,6 @@ Settings -> Agents); avoid `:latest` so deploys are reproducible.
 
 ```bash
 docker run -d --name ares-agent \
-  --platform linux/amd64 \
   -e ARES_TOKEN=<your-registration-token> \
   -v ares-agent-data:/data \
   --restart unless-stopped \
@@ -89,74 +88,25 @@ and Windows (Git Bash / WSL).
 
 ### Option D: Kubernetes
 
-The agent needs no special capabilities, so the manifest is a plain Deployment plus a volume for
-its state. Put the token in a Secret rather than inline.
+Apply the bundled manifest, [`deploy/k8s/ares-agent.yaml`](deploy/k8s/ares-agent.yaml). It is the
+canonical, auto-updating deployment and bundles everything the agent needs on k8s:
 
-<details>
-<summary>Click to expand Kubernetes manifests</summary>
+- the agent plus the companion `ares-updater` **sidecar** (a ServiceAccount scoped to patch only
+  this Deployment, so a dashboard "Update" triggers a native rolling update),
+- a PVC for the agent's state, and
+- `securityContext.fsGroup: 10001` so the non-root agent (uid/gid 10001) can write that volume.
+  Without it the agent cannot persist its identity, the liveness check fails, and the pod
+  crash-loops (a PVC mounts root-owned, unlike a Docker volume).
 
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ares-agent
-stringData:
-  ARES_TOKEN: "<your-registration-token>"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ares-agent-pvc
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ares-agent
-  labels:
-    app: ares-agent
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ares-agent
-  template:
-    metadata:
-      labels:
-        app: ares-agent
-    spec:
-      containers:
-      - name: ares-agent
-        image: ghcr.io/assailai/ares-agent:<version>  # pin to a release; update via the Deployment
-        envFrom:
-        - secretRef:
-            name: ares-agent
-        volumeMounts:
-        - name: data
-          mountPath: /data
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "50m"
-          limits:
-            memory: "256Mi"
-            cpu: "250m"
-        livenessProbe:
-          exec:
-            command: ["test", "-f", "/data/agent-state.json"]
-          initialDelaySeconds: 60
-          periodSeconds: 30
-      volumes:
-      - name: data
-        persistentVolumeClaim:
-          claimName: ares-agent-pvc
+```bash
+curl -fsSLO https://raw.githubusercontent.com/assailai/ares-agent/main/deploy/k8s/ares-agent.yaml
+# set ARES_TOKEN in the Secret at the top of the file (and pin the image to a release), then:
+kubectl apply -f ares-agent.yaml
+kubectl rollout status deploy/ares-agent
 ```
 
-</details>
+To opt out of auto-update, delete the `ares-updater` container plus its ServiceAccount, Role, and
+RoleBinding, and update the image through your own pipeline instead.
 
 ## Configuration
 

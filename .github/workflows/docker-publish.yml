@@ -13,7 +13,6 @@ on:
 
 env:
   REGISTRY_GHCR: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -21,6 +20,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the agent and its companion updater are separate images, both published multi-arch.
+          - dockerfile: Dockerfile
+            ghcr_image: ghcr.io/assailai/ares-agent
+            dockerhub_image: assailai/ares-agent
+          - dockerfile: Dockerfile.updater
+            ghcr_image: ghcr.io/assailai/ares-updater
+            dockerhub_image: assailai/ares-updater
 
     steps:
       - name: Checkout repository
@@ -52,8 +62,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
-            assailai/ares-agent
+            ${{ matrix.ghcr_image }}
+            ${{ matrix.dockerhub_image }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -67,12 +77,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          # Note: arm64 disabled due to grpcio compilation issues on Alpine/musl
-          # grpcio doesn't provide pre-built wheels for linux/arm64/musl and
-          # compilation fails. Re-enable when grpcio provides arm64-musl wheels.
-          platforms: linux/amd64
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.dockerfile }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.dockerfile }}

@@ -78,6 +78,10 @@ spec:
         app: ares-agent
     spec:
       serviceAccountName: ares-updater
+      # the agent runs as the non-root "ares" user (uid/gid 10001), but a PVC mounts root-owned,
+      # so without this the agent cannot write /data (state + update-target) and crash-loops.
+      securityContext:
+        fsGroup: 10001
       containers:
         - name: ares-agent          # the patched container; ARES_UPDATE_CONTAINER matches this
           image: ghcr.io/assailai/ares-agent:2.4.0   # pinned; the updater rolls this forward
