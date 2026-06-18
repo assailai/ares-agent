@@ -81,4 +81,4 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "${{ matrix.image }}@${DIGEST}"
+        run: cosign sign --recursive --yes "${{ matrix.image }}@${DIGEST}"

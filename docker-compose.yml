@@ -36,7 +36,7 @@ services:
       # Fail-closed: verify the image's cosign signature before applying. CI signs published
       # images keyless (OIDC); set false only for local/dev with unsigned images.
       - ARES_UPDATE_REQUIRE_SIGNATURE=true
-      - ARES_UPDATE_COSIGN_IDENTITY=https://github.com/assailai/docker-agent-ares/.github/workflows/docker-publish.yml@refs/tags/v.*
+      - ARES_UPDATE_COSIGN_IDENTITY=^https://github\.com/assailai/docker-agent-ares/\.github/workflows/docker-publish\.yml@refs/tags/v.*$
       - ARES_UPDATE_COSIGN_ISSUER=https://token.actions.githubusercontent.com
     restart: unless-stopped
 

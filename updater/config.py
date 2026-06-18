@@ -27,9 +27,11 @@ class UpdaterSettings(BaseSettings):
     # fail-closed: refuse to apply an image whose signature we cannot verify. Turn this OFF
     # (ARES_UPDATE_REQUIRE_SIGNATURE=false) only for local/dev; CI signs published images.
     require_signature: bool = True
-    # cosign keyless verification (preferred): the expected signer identity, a regexp matched
-    # against the signing workflow's OIDC identity (the release ref varies per version, e.g.
-    # .../docker-publish.yml@refs/tags/v.*), plus the OIDC issuer below.
+    # cosign keyless verification (preferred): the expected signer identity, an ANCHORED regexp
+    # (cosign's -regexp flags are substring matches, so anchor with ^...$ and escape dots) matched
+    # against the signing workflow's OIDC identity. Only released versions verify: the ref is
+    # refs/tags/v* (main / latest / sha images carry refs/heads/main and intentionally do not
+    # verify, so the updater only rolls forward to released versions). Plus the OIDC issuer below.
     cosign_identity: str = ""
     cosign_issuer: str = ""
     # cosign key-based verification (alternative): path to a cosign public key.

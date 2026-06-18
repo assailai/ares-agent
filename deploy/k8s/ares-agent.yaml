@@ -109,7 +109,7 @@ spec:
             - name: ARES_UPDATE_REQUIRE_SIGNATURE
               value: "true"
             - name: ARES_UPDATE_COSIGN_IDENTITY
-              value: "https://github.com/assailai/docker-agent-ares/.github/workflows/docker-publish.yml@refs/tags/v.*"
+              value: "^https://github\\.com/assailai/docker-agent-ares/\\.github/workflows/docker-publish\\.yml@refs/tags/v.*$"
             - name: ARES_UPDATE_COSIGN_ISSUER
               value: "https://token.actions.githubusercontent.com"
           volumeMounts:
