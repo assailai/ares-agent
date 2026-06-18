@@ -1,7 +1,6 @@
 # Ares Agent
 
 [![Docker Image Version](https://img.shields.io/docker/v/assailai/ares-agent?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/assailai/ares-agent)
-[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-available-blue)](https://github.com/assailai/ares-agent/pkgs/container/ares-agent)
 [![License](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 
 Customer-deployable Docker agent that lets the [Ares](https://www.assailai.com) platform hunt
@@ -52,7 +51,7 @@ docker run -d --name ares-agent \
   -e ARES_TOKEN=<your-registration-token> \
   -v ares-agent-data:/data \
   --restart unless-stopped \
-  ghcr.io/assailai/ares-agent:<version>
+  assailai/ares-agent:<version>
 ```
 
 Watch it enroll and come online:
@@ -63,7 +62,7 @@ docker logs -f ares-agent
 # ... Agent online, visible in the dashboard as "<name>".
 ```
 
-The image is also published on Docker Hub as `assailai/ares-agent`, tagged per release.
+Images are published to Docker Hub: `assailai/ares-agent` and `assailai/ares-updater` (the companion updater), tagged per release.
 
 ### Option B: Docker Compose
 
@@ -97,6 +96,9 @@ canonical, auto-updating deployment and bundles everything the agent needs on k8
 - `securityContext.fsGroup: 10001` so the non-root agent (uid/gid 10001) can write that volume.
   Without it the agent cannot persist its identity, the liveness check fails, and the pod
   crash-loops (a PVC mounts root-owned, unlike a Docker volume).
+
+The `assailai/ares-agent` and `assailai/ares-updater` images are public on Docker Hub, so no
+image pull secret is required.
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/assailai/ares-agent/main/deploy/k8s/ares-agent.yaml
@@ -159,7 +161,7 @@ holds the agent's identity, so an upgrade is a pull and re-create on the new tag
 
 ```bash
 docker rm -f ares-agent
-docker pull ghcr.io/assailai/ares-agent:<new-version>
+docker pull assailai/ares-agent:<new-version>
 # re-run the docker run command from Getting started with the new tag (the volume is reused)
 ```
 

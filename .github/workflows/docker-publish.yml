@@ -11,26 +11,20 @@ on:
       - main
   workflow_dispatch:
 
-env:
-  REGISTRY_GHCR: ghcr.io
-
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           # the agent and its companion updater are separate images, both published multi-arch.
           - dockerfile: Dockerfile
-            ghcr_image: ghcr.io/assailai/ares-agent
-            dockerhub_image: assailai/ares-agent
+            image: assailai/ares-agent
           - dockerfile: Dockerfile.updater
-            ghcr_image: ghcr.io/assailai/ares-updater
-            dockerhub_image: assailai/ares-updater
+            image: assailai/ares-updater
 
     steps:
       - name: Checkout repository
@@ -41,14 +35,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY_GHCR }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
@@ -61,9 +47,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ matrix.ghcr_image }}
-            ${{ matrix.dockerhub_image }}
+          images: ${{ matrix.image }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr

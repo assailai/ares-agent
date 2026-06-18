@@ -9,7 +9,7 @@
 #     -e ARES_TOKEN=<registration-token> \
 #     -v ares-agent-data:/data \
 #     --restart unless-stopped \
-#     ghcr.io/assailai/ares-agent:latest
+#     assailai/ares-agent:3.0.0
 # =============================================================================
 
 # -----------------------------------------------------------------------------

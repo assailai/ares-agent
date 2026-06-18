@@ -42,12 +42,12 @@ def _split_ref(image_ref: str) -> tuple[str, str]:
 
 
 def tag_of(image_ref: str) -> str:
-    """``ghcr.io/x/ares-agent:2.5.0`` -> ``2.5.0``; empty string when there is no tag."""
+    """``assailai/ares-agent:2.5.0`` -> ``2.5.0``; empty string when there is no tag."""
     return _split_ref(image_ref)[1]
 
 
 def repo_of(image_ref: str) -> str:
-    """``ghcr.io/x/ares-agent:2.5.0`` -> ``ghcr.io/x/ares-agent`` (drops the tag if present)."""
+    """``assailai/ares-agent:2.5.0`` -> ``assailai/ares-agent`` (drops the tag if present)."""
     return _split_ref(image_ref)[0]
 
 

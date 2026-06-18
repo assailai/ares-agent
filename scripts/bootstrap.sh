@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
-IMAGE="${ARES_IMAGE:-ghcr.io/assailai/ares-agent:${ARES_VERSION:-3.0.0}}"
+IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.0.0}}"
 CONTAINER_NAME="ares-agent"
 VOLUME_NAME="ares-agent-data"
 ONLINE_TIMEOUT=120

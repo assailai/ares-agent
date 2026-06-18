@@ -84,7 +84,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ares-agent          # the patched container; ARES_UPDATE_CONTAINER matches this
-          image: ghcr.io/assailai/ares-agent:3.0.0   # pinned; the updater rolls this forward
+          image: assailai/ares-agent:3.0.0   # pinned; the updater rolls this forward
           envFrom:
             - secretRef:
                 name: ares-agent
@@ -100,7 +100,7 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 30
         - name: ares-updater         # companion; keeps ares-agent on the marked version
-          image: ghcr.io/assailai/ares-updater:3.0.0
+          image: assailai/ares-updater:3.0.0
           env:
             - name: ARES_UPDATE_CONTAINER
               value: "ares-agent"
