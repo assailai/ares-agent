@@ -10,7 +10,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NAME="ares-agent"
+NAME="ares-agent-e2e"
 T="$(mktemp -d)"
 PASS=0 FAIL=0
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +12,11 @@ class UpdaterSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ARES_UPDATE_", extra="ignore")
 
     # the agent container (docker) / Deployment + container (k8s) this updater keeps current.
-    container_name: str = "ares-agent"
+    # the alias accepts the documented ARES_UPDATE_CONTAINER as well as ARES_UPDATE_CONTAINER_NAME.
+    container_name: str = Field(
+        default="ares-agent",
+        validation_alias=AliasChoices("ARES_UPDATE_CONTAINER", "ARES_UPDATE_CONTAINER_NAME"),
+    )
     # optional override for the registry/repo; empty means derive it from the running agent's
     # image so the updater can never pull from a different repo than the agent was deployed from.
     image_repo: str = ""
@@ -21,9 +25,11 @@ class UpdaterSettings(BaseSettings):
     poll_seconds: float = 30.0
 
     # fail-closed: refuse to apply an image whose signature we cannot verify. Turn this OFF
-    # (ARES_UPDATE_REQUIRE_SIGNATURE=false) only for local/dev, before image signing is wired.
+    # (ARES_UPDATE_REQUIRE_SIGNATURE=false) only for local/dev; CI signs published images.
     require_signature: bool = True
-    # cosign keyless verification (preferred): the expected signer identity + OIDC issuer.
+    # cosign keyless verification (preferred): the expected signer identity, a regexp matched
+    # against the signing workflow's OIDC identity (the release ref varies per version, e.g.
+    # .../docker-publish.yml@refs/tags/v.*), plus the OIDC issuer below.
     cosign_identity: str = ""
     cosign_issuer: str = ""
     # cosign key-based verification (alternative): path to a cosign public key.

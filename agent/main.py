@@ -27,7 +27,7 @@ from agent.tunnel import TunnelManager, tunnel_url
 
 logger = logging.getLogger("ares.agent")
 
-# per-connect probe timeout (the task's timeout_seconds is the whole-chunk budget).
+# per-connect probe timeout for the TCP-connect scan.
 _PROBE_TIMEOUT = 2.0
 _REGISTER_RETRY_SECONDS = 10
 # hosts for which a plaintext / unverified ARES_URL is acceptable (local + staging only).

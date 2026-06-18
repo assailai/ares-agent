@@ -29,7 +29,7 @@ def verify(image_ref: str, settings: UpdaterSettings) -> bool:
         cmd += ["--key", settings.cosign_key]
     elif settings.cosign_identity and settings.cosign_issuer:
         cmd += [
-            "--certificate-identity",
+            "--certificate-identity-regexp",
             settings.cosign_identity,
             "--certificate-oidc-issuer",
             settings.cosign_issuer,

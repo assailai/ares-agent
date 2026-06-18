@@ -49,7 +49,7 @@ RUN addgroup -g ${GID} ares && adduser -u ${UID} -G ares -h /app -s /sbin/nologi
 WORKDIR /app
 COPY --chown=ares:ares agent/ ./agent/
 COPY --chown=ares:ares scripts/entrypoint.sh ./entrypoint.sh
-RUN chmod 550 /app/entrypoint.sh && touch /app/agent/__init__.py && chown -R ares:ares /app
+RUN chmod 550 /app/entrypoint.sh && chown -R ares:ares /app
 
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \

@@ -17,6 +17,13 @@ def _settings(**over) -> UpdaterSettings:
     return UpdaterSettings(require_signature=False, **over)
 
 
+def test_container_name_reads_the_documented_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the docs / compose / k8s use ARES_UPDATE_CONTAINER; it must actually set container_name
+    # (reading only the *_NAME alias was a silent-misconfig bug).
+    monkeypatch.setenv("ARES_UPDATE_CONTAINER", "custom-agent")
+    assert _settings().container_name == "custom-agent"
+
+
 def test_image_ref_parsing() -> None:
     assert tag_of("assailai/ares-agent:2.5.0") == "2.5.0"
     assert repo_of("assailai/ares-agent:2.5.0") == "assailai/ares-agent"

@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write   # keyless cosign signing via OIDC
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +36,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
@@ -58,6 +62,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -68,3 +73,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.dockerfile }}
           cache-to: type=gha,mode=max,scope=${{ matrix.dockerfile }}
+
+      # keyless (OIDC) signing so the companion updater can cosign-verify the target before it
+      # applies an update. Sign the manifest by digest, which covers every tag pointing at it.
+      # Skipped on PRs (nothing is pushed there).
+      - name: Sign the image
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${{ matrix.image }}@${DIGEST}"

@@ -12,13 +12,14 @@ LABEL org.opencontainers.image.source="https://github.com/assailai/ares-agent"
 LABEL org.opencontainers.image.vendor="Assail AI"
 
 # cosign verifies the target image's signature (the root of trust) before applying. It is a
-# static binary, so it runs on alpine. (Pin a release tag in CI; latest is fine for dev.)
+# static binary, so it runs on alpine, and is pinned to a release so builds are reproducible.
 # TARGETARCH is set by buildx per target platform (amd64 / arm64) and matches cosign's asset
 # naming, so one Dockerfile builds for both architectures.
 ARG TARGETARCH
+ARG COSIGN_VERSION=v2.4.1
 RUN apk add --no-cache curl \
     && curl -fsSL -o /usr/local/bin/cosign \
-       https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-${TARGETARCH} \
+       https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${TARGETARCH} \
     && chmod +x /usr/local/bin/cosign \
     && apk del curl \
     && pip install --no-cache-dir httpx pydantic-settings \

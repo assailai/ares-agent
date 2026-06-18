@@ -104,14 +104,14 @@ spec:
           env:
             - name: ARES_UPDATE_CONTAINER
               value: "ares-agent"
-            # Fail-closed: verify the image signature before applying. For local/dev before
-            # signing is wired, set "false"; in production set the cosign identity/issuer.
+            # Fail-closed: verify the image's cosign signature before applying. CI signs
+            # published images keyless (OIDC); set "false" only for local/dev with unsigned images.
             - name: ARES_UPDATE_REQUIRE_SIGNATURE
               value: "true"
-            # - name: ARES_UPDATE_COSIGN_IDENTITY
-            #   value: "https://github.com/assailai/ares-agent/.github/workflows/release.yml@refs/tags/*"
-            # - name: ARES_UPDATE_COSIGN_ISSUER
-            #   value: "https://token.actions.githubusercontent.com"
+            - name: ARES_UPDATE_COSIGN_IDENTITY
+              value: "https://github.com/assailai/docker-agent-ares/.github/workflows/docker-publish.yml@refs/tags/v.*"
+            - name: ARES_UPDATE_COSIGN_ISSUER
+              value: "https://token.actions.githubusercontent.com"
           volumeMounts:
             - name: data
               mountPath: /data        # reads the agent's update-target.json
