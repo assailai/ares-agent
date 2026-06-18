@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import types
 
 import httpx
 import pytest
@@ -17,6 +18,13 @@ def _settings(**over) -> UpdaterSettings:
     return UpdaterSettings(require_signature=False, **over)
 
 
+@pytest.fixture(autouse=True)
+def _clear_verified_cache():
+    # the verified-digest cache is a module global; isolate it between tests.
+    main._verified.clear()
+    yield
+
+
 def test_container_name_reads_the_documented_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # the docs / compose / k8s use ARES_UPDATE_CONTAINER; it must actually set container_name
     # (reading only the *_NAME alias was a silent-misconfig bug).
@@ -29,6 +37,8 @@ def test_image_ref_parsing() -> None:
     assert repo_of("assailai/ares-agent:2.5.0") == "assailai/ares-agent"
     assert tag_of("assailai/ares-agent") == ""  # no tag
     assert repo_of("reg:5000/ares-agent") == "reg:5000/ares-agent"  # the ":" is a registry port
+    assert repo_of("assailai/ares-agent@sha256:abc123") == "assailai/ares-agent"  # digest ref
+    assert tag_of("assailai/ares-agent@sha256:abc123") == ""  # a digest is not a tag
 
 
 def test_read_target(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,9 +52,26 @@ def test_read_target(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_verify_gate() -> None:
-    # dev override returns True (with a warning); fail-closed when on but unconfigured.
-    assert verify.verify("img:1", UpdaterSettings(require_signature=False)) is True
-    assert verify.verify("img:1", UpdaterSettings(require_signature=True)) is False
+    # dev override returns the ref unpinned (with a warning); fail-closed (None) when on but
+    # unconfigured (no cosign key or identity).
+    assert verify.verify("img:1", UpdaterSettings(require_signature=False)) == "img:1"
+    assert verify.verify("img:1", UpdaterSettings(require_signature=True)) is None
+
+
+def test_verify_pins_the_cosign_verified_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    # cosign resolves the tag and attests a digest; verify returns that exact digest pinned to
+    # the repo, so the caller applies the verified content rather than re-resolving the tag.
+    payload = '[{"critical": {"image": {"docker-manifest-digest": "sha256:abc123"}}}]'
+    monkeypatch.setattr(
+        verify.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=payload, stderr=""),
+    )
+    pinned = verify.verify(
+        "assailai/ares-agent:3.0.0",
+        UpdaterSettings(require_signature=True, cosign_identity="^id$", cosign_issuer="iss"),
+    )
+    assert pinned == "assailai/ares-agent@sha256:abc123"
 
 
 def test_docker_running_image(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,3 +157,20 @@ def test_tick_noop_when_already_on_target(monkeypatch: pytest.MonkeyPatch) -> No
     backend = _FakeBackend(running="assailai/ares-agent:2.5.0")
     main._tick(backend)
     assert backend.applied is None
+
+
+def test_tick_applies_the_verified_digest_then_noops(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the tick applies the DIGEST verify returned (not the tag), closing the TOCTOU; once the
+    # agent runs that digest, the cache makes a re-tick a noop (no churn, no re-verify).
+    monkeypatch.setattr(main, "settings", _settings())  # verify is mocked below, so the gate is moot
+    monkeypatch.setattr(main, "_read_target", lambda: "2.5.0")
+    pinned = "assailai/ares-agent@sha256:abc123"
+    monkeypatch.setattr(main.verify, "verify", lambda image, settings: pinned)
+
+    backend = _FakeBackend(running="assailai/ares-agent:2.4.0")
+    main._tick(backend)
+    assert backend.applied == pinned  # the verified digest, not the 2.5.0 tag
+
+    backend.running, backend.applied = pinned, None  # agent now runs the pinned digest
+    main._tick(backend)
+    assert backend.applied is None  # cache hit -> no re-apply

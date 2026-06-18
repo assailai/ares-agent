@@ -81,9 +81,14 @@ def _stays_up(docker: httpx.Client, cid: str) -> bool:
 
 
 def _pull(docker: httpx.Client, image_ref: str) -> None:
-    repo, _, tag = image_ref.rpartition(":")
-    # the body is a progress stream; a normal post reads it to completion (= pull finished).
-    docker.post("/images/create", params={"fromImage": repo, "tag": tag}).raise_for_status()
+    # a digest ref (repo@sha256:...) is pulled by passing it whole as fromImage; a tag ref
+    # splits into repo + tag. the body is a progress stream; reading it to completion = pulled.
+    if "@" in image_ref:
+        params = {"fromImage": image_ref}
+    else:
+        repo, _, tag = image_ref.rpartition(":")
+        params = {"fromImage": repo, "tag": tag}
+    docker.post("/images/create", params=params).raise_for_status()
 
 
 def _running(docker: httpx.Client, cid: str) -> bool:

@@ -43,8 +43,12 @@ class UpdaterSettings(BaseSettings):
 
 
 def _split_ref(image_ref: str) -> tuple[str, str]:
-    """Split an image ref into (repo, tag). A trailing ``:`` is a tag only when what follows
-    has no ``/`` (otherwise it is a registry port, e.g. ``reg:5000/img``)."""
+    """Split an image ref into (repo, tag). A digest ref (``repo@sha256:...``) has no tag. A
+    trailing ``:`` is a tag only when what follows has no ``/`` (otherwise it is a registry
+    port, e.g. ``reg:5000/img``)."""
+    repo, at, _digest = image_ref.partition("@")
+    if at:
+        return (repo, "")
     head, sep, tail = image_ref.rpartition(":")
     return (head, tail) if (sep and "/" not in tail) else (image_ref, "")
 

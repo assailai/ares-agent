@@ -46,29 +46,33 @@ def _read_target() -> str | None:
         return None
 
 
-def _target_image(backend: Backend, target_version: str) -> str | None:
-    """The image to move to, or None if there is nothing to do (no agent yet / already there).
-
-    The repo is derived from the running agent's image, so the updater can only pull a new tag
-    of the same image the agent already runs (ARES_UPDATE_IMAGE_REPO overrides it)."""
-    running = backend.running_image(settings)
-    if running is None or tag_of(running) == target_version:
-        return None
-    repo = settings.image_repo or repo_of(running)
-    return f"{repo}:{target_version}"
+# in-memory cache of target version -> the digest ref cosign verified for it. Lets a steady
+# state skip re-verifying every tick (an updater restart re-verifies once rather than
+# re-applying); the updater mounts the shared data dir read-only, so this stays in memory.
+_verified: dict[str, str] = {}
 
 
 def _tick(backend: Backend) -> None:
     target = _read_target()
     if not target:
         return
-    image = _target_image(backend, target)
-    if image is None:
-        return
+    running = backend.running_image(settings)
+    if running is None or tag_of(running) == target:
+        return  # no agent yet, or still on the target version's own tag (initial deploy)
+    if _verified.get(target) == running:
+        return  # already on the digest we verified for this target
+
+    # the repo is derived from the running agent's image, so the updater can only move to a new
+    # tag of the same image the agent already runs (ARES_UPDATE_IMAGE_REPO overrides it).
+    image = f"{settings.image_repo or repo_of(running)}:{target}"
     logger.info("update requested: target %s (%s)", target, image)
-    if not verify.verify(image, settings):
-        return  # fail-closed: leave the agent on its current version
-    backend.apply(settings, image)
+    pinned = verify.verify(image, settings)  # the verified digest ref, or None (fail-closed)
+    if pinned is None:
+        return
+    _verified[target] = pinned
+    if running == pinned:
+        return  # already running the verified digest; cache primed, nothing to apply
+    backend.apply(settings, pinned)
 
 
 def main() -> None:
