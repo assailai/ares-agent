@@ -4,10 +4,12 @@
 # =============================================================================
 # Cross-platform: macOS, Linux, Windows (Git Bash / WSL)
 #
-# Usage:
-#   bash scripts/bootstrap.sh
+# Usage (a registration token is REQUIRED — generate one in the Ares dashboard
+# under Settings -> Agents):
+#   ARES_TOKEN=<token> bash scripts/bootstrap.sh
 #   # or
-#   bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
+#   ARES_TOKEN=<token> bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
+#   # the token may also be passed as the first positional argument.
 #
 # =============================================================================
 
@@ -28,6 +30,13 @@ UPDATER_CONTAINER_NAME="ares-agent-updater"
 UPDATER_REGISTRY="docker.io/assailai/ares-agent"
 SELF_UPDATE="${ARES_SELF_UPDATE:-true}"
 
+# Registration token (REQUIRED). The agent's entrypoint refuses to start without it.
+# Accept it as the first positional argument or the ARES_TOKEN env var — i.e. the
+# documented `ARES_TOKEN=<token> bash <(curl …)` form. Generate one in the Ares
+# dashboard: Settings -> Agents. Validated up-front by require_token() and forwarded
+# to the container in start_container().
+ARES_TOKEN="${1:-${ARES_TOKEN:-}}"
+
 if [ -t 1 ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -43,6 +52,17 @@ info()  { printf "${GREEN}[INFO]${NC}  %s\n" "$1"; }
 warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$1"; }
 error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
 step()  { printf "\n${BLUE}${BOLD}==> %s${NC}\n" "$1"; }
+
+# Fail fast (before pulling the image) if no registration token was supplied — the
+# agent entrypoint would otherwise crash-loop with "ARES_TOKEN is required".
+require_token() {
+    if [ -z "${ARES_TOKEN}" ]; then
+        error "ARES_TOKEN is required."
+        error "Generate a registration token in the Ares dashboard (Settings -> Agents), then re-run:"
+        error "  ARES_TOKEN=<token> bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)"
+        exit 1
+    fi
+}
 
 detect_platform() {
     local os
@@ -172,6 +192,7 @@ start_container() {
         --user root
         --cap-add=NET_ADMIN
         -e ARES_RUN_AS_ROOT=true
+        -e ARES_TOKEN="$ARES_TOKEN"
         -p "${PORT}:8443"
         -v "${VOLUME_NAME}:/data"
         --restart unless-stopped
@@ -443,6 +464,7 @@ main() {
     printf "\n${BOLD}Ares Docker Agent - Bootstrap${NC}\n"
     printf "================================\n\n"
 
+    require_token
     detect_platform
     check_docker
     check_existing_container
