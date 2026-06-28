@@ -27,9 +27,28 @@ from agent.tunnel import TunnelManager, tunnel_url
 
 logger = logging.getLogger("ares.agent")
 
+
+class _AuthInvalidated(Exception):
+    """The control plane rejected our agent token past the retry threshold.
+
+    Raised out of the heartbeat loop so :func:`run` can drop the stale identity and
+    re-enroll with ARES_TOKEN, rather than 401-looping forever on dead credentials.
+    """
+
 # per-connect probe timeout for the TCP-connect scan.
 _PROBE_TIMEOUT = 2.0
 _REGISTER_RETRY_SECONDS = 10
+# Consecutive 401s on the heartbeat before we attempt to re-enroll. A single 401 can be a
+# momentary blip (a load balancer mid-rollover); a streak means the stored agent token was
+# rejected for real (stale kept-volume creds or a decommissioned agent). The re-enroll it
+# triggers is non-destructive (see _reenroll), so the streak only needs to filter blips, not
+# to prove a decommission: a transient 401 on a healthy agent recovers on its own.
+_REENROLL_AFTER_UNAUTHORIZED = 3
+# How long to wait before serving again after a re-enroll attempt failed (the registration
+# token is spent, or Ares was unreachable). Paces the retry so a decommissioned agent idles
+# quietly instead of busy-looping, without ever exiting the process (which would hand the
+# restart cadence to Docker and risk a fast restart storm).
+_REENROLL_RETRY_SECONDS = 60
 # hosts for which a plaintext / unverified ARES_URL is acceptable (local + staging only).
 _INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 # cadence the server hands back at register / heartbeat (sane defaults until then).
@@ -92,6 +111,8 @@ def _write_update_target(version: str) -> None:
 
 async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
     failures = 0
+    unauthorized = 0
+    online_announced = False
     while True:
         try:
             # CPU sampling reads the cgroup counter twice on the first call; keep it off the loop.
@@ -103,9 +124,18 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
                 memory_percent=read_memory_percent(),
                 uptime_seconds=int(time.monotonic() - _AGENT_START_MONOTONIC),
             )
+            # Announce "online" only once the control plane has actually accepted a beat, so
+            # the log never claims the agent is up while its credentials are in fact rejected.
+            if not online_announced:
+                logger.info(
+                    'Agent online, visible in the dashboard as "%s".',
+                    settings.agent_name or "this host",
+                )
+                online_announced = True
             if failures:
                 logger.info("Heartbeat recovered after %d failed attempt(s).", failures)
-                failures = 0
+            failures = 0
+            unauthorized = 0
             _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
             tunnel.sync(bool(resp.get("tunnel_required")))
             if resp.get("restart_requested"):
@@ -118,7 +148,17 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
         except httpx.HTTPStatusError as exc:
             failures += 1
             if exc.response.status_code == 401:
-                logger.error("Heartbeat unauthorized: the agent may have been decommissioned.")
+                unauthorized += 1
+                if unauthorized >= _REENROLL_AFTER_UNAUTHORIZED:
+                    # Sustained rejection: the stored token is dead. Surface it so run() can
+                    # drop the identity and re-enroll instead of 401-looping forever.
+                    raise _AuthInvalidated from exc
+                logger.warning(
+                    "Heartbeat unauthorized (%d/%d): the stored agent credentials look stale or "
+                    "the agent was decommissioned; will re-enroll with ARES_TOKEN if this persists.",
+                    unauthorized,
+                    _REENROLL_AFTER_UNAUTHORIZED,
+                )
             else:
                 _log_repeated_failure("heartbeat", failures, exc)
         except Exception as exc:  # noqa: BLE001 - keep heartbeating through any transient error
@@ -166,6 +206,77 @@ async def _poll_loop(state: AgentState) -> None:
         await asyncio.sleep(_cadence["poll"])
 
 
+async def _enroll(networks: list[str]) -> AgentState | None:
+    """Return a registered state, re-using a stored identity or enrolling with ARES_TOKEN.
+
+    Retries transient connectivity errors forever (the control plane may not be reachable
+    yet); returns None only when the registration token is rejected outright (expired or
+    already used), which is fatal and the caller surfaces to the operator.
+    """
+    state = load_state(settings.state_path)
+    while not state.registered:
+        try:
+            state = await _register(state, networks)
+        except control_plane.RegistrationRejected:
+            logger.error(
+                "Registration token rejected (expired or already used). "
+                "Generate a fresh token in the Ares dashboard."
+            )
+            return None
+        except (httpx.HTTPError, OSError) as exc:
+            logger.error(
+                "Cannot reach Ares at %s: %s. Retrying in %ds.",
+                settings.base_url,
+                exc,
+                _REGISTER_RETRY_SECONDS,
+            )
+            await asyncio.sleep(_REGISTER_RETRY_SECONDS)
+    return state
+
+
+async def _reenroll(networks: list[str]) -> AgentState | None:
+    """Mint a fresh identity with ARES_TOKEN after the stored credentials were rejected.
+
+    Non-destructive by design: this enrolls into a brand-new state and only persists it on
+    success, so the caller can keep the existing credentials if this fails. It succeeds only
+    when ARES_TOKEN is still an unused, valid registration token (the kept-volume case, where
+    the stored token was minted for a previous container). It returns None when the token is
+    already spent (a decommissioned agent, or a healthy agent that merely hit a transient 401)
+    or Ares is unreachable, so a blanket 401 never strands the agent on a one-time token.
+    """
+    try:
+        return await _register(AgentState(), networks)
+    except control_plane.RegistrationRejected:
+        return None
+    except (httpx.HTTPError, OSError) as exc:
+        logger.debug("re-enrollment could not reach Ares: %s", exc)
+        return None
+
+
+async def _serve(state: AgentState, tunnel: TunnelManager) -> None:
+    """Run the heartbeat and task-poll loops until one exits. If either raises (e.g. the
+    heartbeat raises _AuthInvalidated on a sustained 401), cancel its sibling and re-raise
+    so the caller decides whether to re-enroll or shut down."""
+    tasks = {
+        asyncio.create_task(_heartbeat_loop(state, tunnel)),
+        asyncio.create_task(_poll_loop(state)),
+    }
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            raise exc
+
+
 async def run() -> int:
     _configure_logging()
     if not settings.token:
@@ -183,7 +294,6 @@ async def run() -> int:
         return 1
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    state = load_state(settings.state_path)
     networks = settings.network_overrides() or netdetect.detect_networks()
     if not networks:
         logger.warning(
@@ -191,36 +301,46 @@ async def run() -> int:
             "networks. Set ARES_NETWORKS=10.0.0.0/24,... or edit them in the dashboard."
         )
 
-    while not state.registered:
-        try:
-            state = await _register(state, networks)
-        except control_plane.RegistrationRejected:
-            logger.error(
-                "Registration token rejected (expired or already used). "
-                "Generate a fresh token in the Ares dashboard."
-            )
-            return 1
-        except (httpx.HTTPError, OSError) as exc:
-            logger.error(
-                "Cannot reach Ares at %s: %s. Retrying in %ds.",
-                settings.base_url,
-                exc,
-                _REGISTER_RETRY_SECONDS,
-            )
-            await asyncio.sleep(_REGISTER_RETRY_SECONDS)
+    state = await _enroll(networks)
+    if state is None:
+        return 1
 
-    tunnel = TunnelManager(
-        tunnel_url(settings.base_url),
-        state.agent_token or "",
-        networks,
-        insecure=settings.insecure,
-    )
-    logger.info('Agent online, visible in the dashboard as "%s".', settings.agent_name or "this host")
-    try:
-        await asyncio.gather(_heartbeat_loop(state, tunnel), _poll_loop(state))
-    finally:
-        tunnel.stop()
-    return 0
+    # Serve forever, self-healing across credential rejections. A sustained 401 means the
+    # stored token was rejected (stale kept-volume creds, or a decommissioned agent); we try
+    # to re-enroll with ARES_TOKEN but never discard the current credentials first, and never
+    # exit the process over it. Re-enrollment replaces the identity only on success (a fresh,
+    # unused token), so a transient 401 on a healthy agent recovers on its own and a spent
+    # token leaves the agent intact rather than crash-looping.
+    while True:
+        tunnel = TunnelManager(
+            tunnel_url(settings.base_url),
+            state.agent_token or "",
+            networks,
+            insecure=settings.insecure,
+        )
+        try:
+            await _serve(state, tunnel)
+        except _AuthInvalidated:
+            logger.warning(
+                "Control plane rejected the stored agent credentials; attempting to "
+                "re-enroll with ARES_TOKEN."
+            )
+            reenrolled = await _reenroll(networks)
+            if reenrolled is not None:
+                state = reenrolled
+                logger.info("Re-enrolled with a fresh agent identity.")
+            else:
+                logger.error(
+                    "Could not re-enroll: the registration token is spent or Ares is "
+                    "unreachable. Keeping the current credentials and retrying. If this agent "
+                    "was decommissioned, stop the container; to give it a new identity, "
+                    "redeploy with a fresh ARES_TOKEN."
+                )
+                await asyncio.sleep(_REENROLL_RETRY_SECONDS)
+        else:
+            return 0  # both loops ended without error: nothing left to do
+        finally:
+            tunnel.stop()
 
 
 def main() -> None:

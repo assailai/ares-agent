@@ -199,7 +199,7 @@ Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 | `Registration token rejected` | The token expired or was already used. Generate a fresh one in Settings -> Agents. |
 | `Cannot reach Ares at ...` | The host can't reach your Ares URL on 443. Check egress / proxy rules. The agent keeps retrying. |
 | `No internal LAN auto-detected` | Auto-detection found nothing scannable. Set `ARES_NETWORKS=10.0.0.0/24,...` or edit the networks in the dashboard. |
-| `Heartbeat unauthorized` | The agent was decommissioned in the dashboard. Re-enroll with a new token. |
+| `Heartbeat unauthorized` | The stored agent credentials were rejected (a decommissioned agent, or stale credentials from a kept `/data` volume). After a few consecutive rejections the agent tries to re-enroll with `ARES_TOKEN`: if the token is still unused it adopts a fresh identity and recovers; if the token is spent it keeps the current credentials and retries (it does not exit or wipe anything), so a decommissioned agent idles quietly. To give such an agent a new identity, redeploy with a fresh token. |
 
 **Health check.** The container is healthy once it has registered, which is when
 `/data/agent-state.json` exists:
