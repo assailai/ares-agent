@@ -1,15 +1,8 @@
 """Single source of truth for the Ares Docker Agent version.
 
-Consumed by:
-  - agent.config.Settings.agent_version (reported to the platform at
-    registration and in every heartbeat),
-  - the container entrypoint banner (scripts/entrypoint.sh),
-  - the updater's anti-downgrade check (agent.updater).
-
-Keep this in lockstep with the platform's LATEST_AGENT_VERSION
-(services/hunt-agent-manager/main.py) so a freshly-built current agent reads
-as "up to date" in the dashboard.
+Consumed by agent.config.Settings.agent_version, which reports it to the platform
+at registration and in every heartbeat. Bump this on a release; the companion
+updater then rolls deployments to the version the server marks current.
 """
 
-__version__ = "2.5.3"
-"""Current agent build version (semver, no leading 'v')."""
+__version__ = "3.0.0"

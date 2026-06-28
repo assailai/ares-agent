@@ -1,15 +1,14 @@
-"""
-Ares Docker Agent - System Metrics
+"""Lightweight CPU / memory sampling for heartbeat telemetry.
 
-Lightweight CPU / memory sampling. Deliberately avoids a psutil dependency to
-keep the security-audited, pinned requirement set minimal.
-
-CPU is measured from the CONTAINER's own cgroup CPU accounting, averaged over
-the interval since the previous reading (≈ the heartbeat cadence) — not a short
-whole-host /proc/stat spot sample. The spot sample read ~0 on an idle Docker
-Desktop VM and was unreliable under amd64 emulation; the cgroup counter is a
-monotonic measure of CPU time actually consumed by this agent.
+Deliberately avoids a psutil dependency to keep the pinned requirement set
+minimal. CPU is measured from the CONTAINER's own cgroup CPU accounting,
+averaged over the interval since the previous reading (the heartbeat cadence),
+not a short whole-host /proc/stat spot sample: the spot sample read ~0 on an
+idle Docker Desktop VM and was unreliable under amd64 emulation, whereas the
+cgroup counter is a monotonic measure of CPU time actually consumed by this
+agent.
 """
+
 import os
 import time
 
@@ -18,7 +17,7 @@ def read_memory_percent() -> float:
     """Percentage of RAM in use (0-100), derived from /proc/meminfo."""
     try:
         info = {}
-        with open("/proc/meminfo", "r") as f:
+        with open("/proc/meminfo") as f:
             for line in f:
                 key, _, rest = line.partition(":")
                 if rest:
@@ -41,34 +40,38 @@ def read_memory_percent() -> float:
         return 0.0
 
 
-# Baseline for the interval-spanning cgroup CPU measurement (persists across
+# baseline for the interval-spanning cgroup CPU measurement (persists across
 # calls within the agent process).
-_prev_cpu = {"usage_s": None, "wall": None}
+_prev_cpu: dict[str, float | None] = {"usage_s": None, "wall": None}
 
 
-def _container_cpu_seconds():
+def _container_cpu_seconds() -> float | None:
     """Total CPU seconds consumed by THIS container so far (monotonic), from the
     cgroup CPU accounting. Returns None if cgroup accounting isn't available."""
     # cgroup v2 (Docker Desktop, modern hosts): /sys/fs/cgroup/cpu.stat
     try:
-        with open("/sys/fs/cgroup/cpu.stat", "r") as f:
+        with open("/sys/fs/cgroup/cpu.stat") as f:
             for line in f:
                 if line.startswith("usage_usec"):
                     return int(line.split()[1]) / 1_000_000.0
     except Exception:
         pass
     # cgroup v1: cpuacct.usage is in nanoseconds
-    for path in ("/sys/fs/cgroup/cpuacct/cpuacct.usage",
-                 "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage"):
+    for path in (
+        "/sys/fs/cgroup/cpuacct/cpuacct.usage",
+        "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage",
+    ):
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 return int(f.read().strip()) / 1_000_000_000.0
         except Exception:
             continue
     return None
 
 
-def _cpu_pct_over(prev_usage, prev_wall, usage, wall):
+def _cpu_pct_over(
+    prev_usage: float | None, prev_wall: float | None, usage: float, wall: float
+) -> float | None:
     """CPU% of available cores between two (cpu_seconds, wall_monotonic) samples."""
     if prev_usage is None or prev_wall is None or wall <= prev_wall:
         return None
@@ -79,14 +82,16 @@ def _cpu_pct_over(prev_usage, prev_wall, usage, wall):
 
 def _read_proc_stat_percent(interval: float) -> float:
     """Fallback only: whole-host CPU% over a short /proc/stat sample."""
-    def times():
-        with open("/proc/stat", "r") as f:
+
+    def times() -> tuple[int, int]:
+        with open("/proc/stat") as f:
             for line in f:
                 if line.startswith("cpu "):
                     fields = [int(x) for x in line.split()[1:]]
                     idle = fields[3] + (fields[4] if len(fields) > 4 else 0)
                     return idle, sum(fields)
         return 0, 0
+
     try:
         idle1, total1 = times()
         time.sleep(interval)
@@ -101,10 +106,10 @@ def _read_proc_stat_percent(interval: float) -> float:
 
 def read_cpu_percent(interval: float = 0.5) -> float:
     """This agent's CPU utilisation as a percent of available cores, averaged
-    over the time since the previous call (≈ the heartbeat interval). The first
+    over the time since the previous call (the heartbeat interval). The first
     call (no baseline) takes a brief inline sample so it isn't reported as 0.
 
-    Blocking on the first call only — call via ``asyncio.to_thread`` from async
+    Blocking on the first call only: call via ``asyncio.to_thread`` from async
     contexts.
     """
     try:
@@ -120,7 +125,7 @@ def read_cpu_percent(interval: float = 0.5) -> float:
         if pct is not None:
             return pct
 
-        # No baseline yet (first heartbeat): take a short inline sample so we
+        # no baseline yet (first heartbeat): take a short inline sample so we
         # return a real number now instead of 0.
         time.sleep(interval)
         usage2 = _container_cpu_seconds()

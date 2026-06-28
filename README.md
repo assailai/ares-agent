@@ -1,437 +1,224 @@
 # Ares Agent
 
 [![Docker Image Version](https://img.shields.io/docker/v/assailai/ares-agent?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/assailai/ares-agent)
-[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-available-blue)](https://github.com/assailai/ares-agent/pkgs/container/ares-agent)
 [![License](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
-[![Security Hardened](https://img.shields.io/badge/Security-Hardened-green.svg)](#security)
 
-Customer-deployable Docker agent for scanning internal APIs through the [Ares](https://www.assailai.com) platform. Deploy this agent inside your network to enable secure API security testing of internal services that aren't exposed to the internet.
+Customer-deployable Docker agent that lets the [Ares](https://www.assailai.com) platform hunt
+internal services that aren't exposed to the internet. Deploy it inside your network with one
+command: it registers itself, shows up in your dashboard, scans the internal ranges you approve,
+and gives Ares a way to reach the discovered hosts for assessment.
 
-## Overview
+The agent is **outbound-only and headless**. There is no web UI, no inbound port to open, and no
+host privileges to grant.
 
-The Ares Agent establishes a secure WireGuard VPN tunnel from your internal network to the Ares platform, allowing Ares to perform comprehensive API security testing on your internal services without requiring inbound firewall rules or exposing your APIs to the internet.
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Your Internal Network                         │
-│  ┌─────────────┐      ┌─────────────┐      ┌─────────────────────┐  │
-│  │ Internal    │      │   Ares      │      │  Internal APIs      │  │
-│  │ Services    │◄────►│   Agent     │◄────►│  (10.x.x.x)         │  │
-│  └─────────────┘      └──────┬──────┘      └─────────────────────┘  │
-│                              │                                       │
-└──────────────────────────────┼───────────────────────────────────────┘
-                               │ WireGuard VPN (Outbound UDP 51820)
-                               │ ChaCha20-Poly1305 Encryption
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Ares Cloud Platform                          │
-│  ┌─────────────┐      ┌─────────────┐      ┌─────────────────────┐  │
-│  │ API Security│      │   Tunnel    │      │  Results &          │  │
-│  │ Scanner     │◄────►│   Gateway   │◄────►│  Dashboard          │  │
-│  └─────────────┘      └─────────────┘      └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+  Your internal network                              Ares platform (cloud)
+ ┌───────────────────────────┐                      ┌──────────────────────────┐
+ │  ares-agent (container)    │   HTTPS (443)        │  control plane           │
+ │   1. read ARES_TOKEN       │ ───────────────────▶ │   register / heartbeat   │
+ │   2. auto-detect LAN CIDRs │                      │   poll tasks / report    │
+ │   3. connect-scan locally  │   WebSocket (443)    │                          │
+ │   4. proxy to internal     │ ◀═══════════════════▶ │  hunt assessment         │
+ │      hosts during a hunt   │   (opened on demand) │                          │
+ └───────────────────────────┘                      └──────────────────────────┘
 ```
 
-## Features
+1. **Register** - on start the agent reads its one-time registration token, auto-detects the
+   internal networks it can see, and registers over HTTPS. It then appears in your dashboard.
+2. **Heartbeat + poll** - it checks in on a fixed cadence and polls for scan tasks. No inbound
+   connections are ever made to the agent.
+3. **Scan** - when you launch an internal hunt, the agent runs a TCP-connect scan of the
+   approved CIDRs and reports the live hosts it found.
+4. **Reach-in** - while a hunt is running the agent opens an outbound WebSocket back to Ares and
+   proxies TCP streams to the discovered hosts, restricted to the networks you approved. The
+   tunnel is closed when no hunt is active.
 
-- **Web-Based Setup Wizard** - Intuitive browser-based configuration with step-by-step guidance
-- **Secure by Default** - Non-root execution, TLS encryption, bcrypt password hashing, session management
-- **Encryption at Rest** - Sensitive data (keys, tokens) encrypted using Fernet (AES-128-CBC + HMAC)
-- **WireGuard VPN Tunnel** - Industry-standard encrypted tunnel using ChaCha20-Poly1305
-- **No Inbound Firewall Rules** - Agent initiates all connections; no ports need to be opened inbound
-- **Persistent Configuration** - Settings survive container restarts via Docker volumes
-- **Health Monitoring** - Built-in health checks for container orchestration
-- **Audit Logging** - All administrative actions logged locally
+## Getting started
 
-## Getting Started
+You need a **registration token** first. In the Ares dashboard go to **Settings -> Agents**,
+generate a token (it starts with `ares_agt_`), and copy it. Tokens are one-time: each enrolls a
+single agent.
 
-### Option A: Bootstrap Script (Recommended)
+### Option A: Docker run
 
-The bootstrap script handles everything — pulls the image, starts the container, retrieves your password, and opens the browser:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
-```
-
-Or clone the repo and run locally:
-```bash
-git clone https://github.com/assailai/ares-agent.git
-bash ares-agent/scripts/bootstrap.sh
-```
-
-Works on macOS, Linux, and Windows (Git Bash / WSL).
-
-### Option B: Docker Run
+Pin to a specific version (the dashboard's deploy command shows the current release under
+Settings -> Agents); avoid `:latest` so deploys are reproducible.
 
 ```bash
 docker run -d --name ares-agent \
-  --platform linux/amd64 \
-  --user root \
-  --cap-add=NET_ADMIN \
-  --device /dev/net/tun:/dev/net/tun \
-  --sysctl net.ipv4.ip_forward=1 \
-  -e ARES_RUN_AS_ROOT=true \
-  -p 8443:8443 \
+  -e ARES_TOKEN=<your-registration-token> \
   -v ares-agent-data:/data \
   --restart unless-stopped \
-  assailai/ares-agent:latest
+  assailai/ares-agent:<version>
 ```
 
-Using GitHub Container Registry instead:
+Watch it enroll and come online:
+
 ```bash
-# Replace assailai/ares-agent:latest with:
-ghcr.io/assailai/ares-agent:latest
+docker logs -f ares-agent
+# ... Registered as agent <id>
+# ... Agent online, visible in the dashboard as "<name>".
 ```
 
-Then get your initial password and open the web interface:
+Images are published to Docker Hub: `assailai/ares-agent` and `assailai/ares-updater` (the companion updater), tagged per release.
+
+### Option B: Docker Compose
 
 ```bash
-# Get the initial password
-docker logs ares-agent
-
-# Open https://localhost:8443 in your browser
-```
-
-### Option C: Docker Compose
-
-```bash
-# Uses the included docker-compose.yml
-docker compose up -d
-
-# Get the initial password
-docker compose logs ares-agent | grep "Initial Password"
+ARES_TOKEN=<your-registration-token> docker compose up -d
+docker compose logs -f
 ```
 
 See [docker-compose.yml](docker-compose.yml) for the full configuration.
 
-### Option D: Kubernetes
+### Option C: Bootstrap script
 
-Verified on EKS 1.29 with the AWS VPC CNI: the pod boots, `/dev/net/tun` is usable with `NET_ADMIN` (no `privileged: true` required), and the web UI serves on port 8443.
-
-> **CNI caveat — `net.ipv4.ip_forward`**
-> WireGuard routing into internal CIDRs needs `net.ipv4.ip_forward=1` in the pod's network namespace. The entrypoint tries to set it but `/proc/sys` is read-only inside the container, so it depends on what the CNI sets:
-> - **AWS VPC CNI (EKS)** — already `1` in the pod netns, so this works out of the box.
-> - **Azure CNI / Calico / Cilium** — may leave it at `0`. WireGuard will route packets to the cluster's CIDRs but not forward them, so internal-network scanning will silently fail.
->
-> If you're not on EKS, verify with `kubectl exec deploy/ares-agent -- cat /proc/sys/net/ipv4/ip_forward`. If it's `0`, you can't fix it via `securityContext.sysctls` because `net.ipv4.ip_forward` is an unsafe sysctl that most managed kubelets reject (`SysctlForbidden`). The workarounds are: configure the kubelet with `--allowed-unsafe-sysctls=net.ipv4.ip_forward` and add the sysctl to `spec.securityContext.sysctls`, or run a `privileged: true` init container that does `sysctl -w net.ipv4.ip_forward=1`.
-
-<details>
-<summary>Click to expand Kubernetes manifests</summary>
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ares-agent
-  labels:
-    app: ares-agent
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ares-agent
-  template:
-    metadata:
-      labels:
-        app: ares-agent
-    spec:
-      containers:
-      - name: ares-agent
-        image: assailai/ares-agent:latest
-        env:
-        - name: ARES_RUN_AS_ROOT
-          value: "true"
-        ports:
-        - containerPort: 8443
-          name: https
-        volumeMounts:
-        - name: data
-          mountPath: /data
-        - name: tun-device
-          mountPath: /dev/net/tun
-        securityContext:
-          runAsUser: 0
-          capabilities:
-            add:
-            - NET_ADMIN
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8443
-            scheme: HTTPS
-          initialDelaySeconds: 30
-          periodSeconds: 30
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8443
-            scheme: HTTPS
-          initialDelaySeconds: 10
-          periodSeconds: 10
-      volumes:
-      - name: data
-        persistentVolumeClaim:
-          claimName: ares-agent-pvc
-      - name: tun-device
-        hostPath:
-          path: /dev/net/tun
-          type: CharDevice
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ares-agent-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ares-agent
-spec:
-  selector:
-    app: ares-agent
-  ports:
-  - port: 8443
-    targetPort: 8443
-    name: https
-  type: ClusterIP
-```
-
-Apply the manifests, fetch the initial password, then port-forward to reach the UI:
+The bootstrap script checks Docker is available, starts the container, and waits until the agent
+reports online:
 
 ```bash
-kubectl apply -f ares-agent.yaml
-
-# Get the initial password
-kubectl logs deploy/ares-agent | grep "Initial Password"
-
-# Open the web interface
-kubectl port-forward svc/ares-agent 8443:8443
-# Then open https://localhost:8443
+ARES_TOKEN=<your-registration-token> bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
 ```
 
-For permanent external access, replace the port-forward with an Ingress or a `LoadBalancer`-type Service in front of port 8443.
+It also accepts the token as an argument or prompts for it interactively. Works on macOS, Linux,
+and Windows (Git Bash / WSL).
 
-</details>
+### Option D: Kubernetes
 
-### First Login
+Apply the bundled manifest, [`deploy/k8s/ares-agent.yaml`](deploy/k8s/ares-agent.yaml). It is the
+canonical, auto-updating deployment and bundles everything the agent needs on k8s:
 
-1. Navigate to `https://<your-host>:8443` in your browser
-2. Accept the self-signed certificate warning
-3. Log in with the initial password from the logs
-4. Complete the setup wizard
+- the agent plus the companion `ares-updater` **sidecar** (a ServiceAccount scoped to patch only
+  this Deployment, so a dashboard "Update" triggers a native rolling update),
+- a PVC for the agent's state, and
+- `securityContext.fsGroup: 10001` so the non-root agent (uid/gid 10001) can write that volume.
+  Without it the agent cannot persist its identity, the liveness check fails, and the pod
+  crash-loops (a PVC mounts root-owned, unlike a Docker volume).
 
-## Requirements
+The `assailai/ares-agent` and `assailai/ares-updater` images are public on Docker Hub, so no
+image pull secret is required.
 
-| Requirement | Docker Flag | Why |
-|-------------|-------------|-----|
-| Docker 20.10+ | — | Minimum supported version |
-| Platform | `--platform linux/amd64` | Image is built for amd64 only |
-| Root user | `--user root` | WireGuard needs root to create network interfaces |
-| NET_ADMIN | `--cap-add=NET_ADMIN` | Required for network interface management |
-| TUN device | `--device /dev/net/tun:/dev/net/tun` | WireGuard userspace implementation |
-| IP forwarding | `--sysctl net.ipv4.ip_forward=1` | Routing to internal networks |
-| Root env | `-e ARES_RUN_AS_ROOT=true` | Keeps agent running as root for WireGuard |
-| Outbound UDP 51820 | — | WireGuard VPN tunnel |
-| Outbound TCP 443 | — | Registration and API |
-| 256MB memory | — | Minimum recommended |
-| 100MB disk | — | For data volume |
+```bash
+curl -fsSLO https://raw.githubusercontent.com/assailai/ares-agent/main/deploy/k8s/ares-agent.yaml
+# set ARES_TOKEN in the Secret at the top of the file (and pin the image to a release), then:
+kubectl apply -f ares-agent.yaml
+kubectl rollout status deploy/ares-agent
+```
 
-> **No host WireGuard installation required** - The agent includes wireguard-go (userspace WireGuard implementation).
+To opt out of auto-update, delete the `ares-updater` container plus its ServiceAccount, Role, and
+RoleBinding, and update the image through your own pipeline instead.
 
 ## Configuration
 
-### Setup Wizard Steps
-
-1. **Login** - Use the initial password from container logs
-2. **Change Password** - Set a strong password (minimum 12 characters)
-3. **Platform URL** - Enter your Ares platform URL (e.g., `https://api.assail.ai`)
-4. **Registration Token** - Generate a token from the Ares dashboard and enter it here
-5. **Internal Networks** - Define which CIDR ranges can be scanned (e.g., `10.0.0.0/8`, `172.16.0.0/12`)
-6. **Agent Name** - Give your agent a descriptive name for the dashboard
-7. **Connect** - Establish the WireGuard tunnel
-
-### Environment Variables
+The agent is configured entirely through environment variables (all prefixed `ARES_`).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATA_DIR` | `/data` | Directory for persistent data |
-| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `HTTPS_PORT` | `8443` | Port for web interface |
+| `ARES_TOKEN` | *(required)* | One-time registration token from the dashboard. The agent exits with a clear message if it is missing. |
+| `ARES_URL` | `https://api.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
+| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection. You can also edit the networks in the dashboard after enrollment. |
+| `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
+| `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
+| `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
 
-### Volumes
+### Volume
 
 | Path | Description |
 |------|-------------|
-| `/data` | All persistent data (config, database, certificates) |
-| `/data/tls` | TLS certificates for web interface |
-| `/data/wireguard` | WireGuard VPN configuration |
-| `/data/db` | SQLite database |
+| `/data` | Persistent state. Holds `agent-state.json` (the agent id and its auth token) so the agent keeps its identity across restarts. |
 
-## Network Requirements
+## Network requirements
 
-### Outbound (Required)
+The agent only makes **outbound** connections, all to your Ares URL:
 
-| Destination | Port | Protocol | Description |
-|-------------|------|----------|-------------|
-| Ares Platform | 51820 | UDP | WireGuard VPN tunnel |
-| Ares Platform | 443 | TCP | Initial registration and API |
+| Direction | Port | Protocol | Purpose |
+|-----------|------|----------|---------|
+| Outbound | 443 | HTTPS | Registration, heartbeat, task polling, result reporting |
+| Outbound | 443 | WebSocket (WSS) | Data-plane tunnel, opened only while a hunt is running |
 
-### Inbound
-
-**No inbound firewall rules required.** The agent initiates all connections outbound.
+**No inbound firewall rules are required.** Locally, the agent connects to the internal hosts on
+whatever ports your hunt targets (commonly 80, 443, 8080, 8443).
 
 ## Security
 
-The Ares Agent is built with security as a top priority:
-
-### Container Security
-- **Root + NET_ADMIN required** - WireGuard VPN requires root and NET_ADMIN capability for network interface management
-- **Userspace WireGuard** - Uses wireguard-go, no kernel module required
-- **Minimal attack surface** - Multi-stage build with only runtime dependencies
-- **No secrets in image** - All credentials provided at runtime
-- **Isolated networking** - WireGuard creates an isolated overlay network
-- **Auto-recovery** - Automatically attempts to restore tunnel if it goes down
-
-### Authentication & Sessions
-- **bcrypt password hashing** - Cost factor 12
-- **Secure sessions** - 24-hour expiry, HttpOnly, SameSite=Strict cookies
-- **Account lockout** - 5 failed attempts triggers 30-minute lockout
-- **Forced password change** - Initial password must be changed on first login
-
-### Data Protection
-- **Encryption at rest** - Sensitive data encrypted using Fernet (AES-128-CBC + HMAC)
-- **Key derivation** - HKDF with unique contexts per data type
-- **Protected fields** - WireGuard private keys, JWT tokens, registration tokens
-- **Secure key storage** - Master encryption key stored with 0600 permissions
-
-### Network Security
-- **TLS 1.2+** - Self-signed certificate auto-generated on first run
-- **WireGuard VPN** - ChaCha20-Poly1305 authenticated encryption
-- **No inbound ports** - Agent initiates all connections
-
-### Audit & Compliance
-- **Audit logging** - All administrative actions logged with timestamps
-- **Docker Scout compliant** - Passes Docker security scanning
-- **CVE monitoring** - Dependencies pinned to versions with known CVE fixes
+- **Non-root, no privileges** - the container runs as an unprivileged user (uid 10001). It needs
+  no `NET_ADMIN`, no `/dev/net/tun`, and no host `sysctl` changes.
+- **Outbound-only** - the agent initiates every connection. Nothing listens for inbound traffic.
+- **Scoped reach-in** - the data-plane tunnel only proxies to the networks you approved for the
+  agent, enforced on the agent side. It exists only while a hunt is running.
+- **Minimal image** - multi-stage Alpine build with runtime dependencies only; no secrets baked
+  into the image.
+- **Token at rest** - the agent's auth token lives in the `/data` volume (mode 0700), supplied at
+  runtime and never in the image.
 
 ## Upgrading
 
-To upgrade while preserving your configuration:
+Pin the agent to a specific version (the current release is shown in the Ares dashboard under
+Settings -> Agents) rather than a moving tag, so deploys are reproducible. The `/data` volume
+holds the agent's identity, so an upgrade is a pull and re-create on the new tag:
 
 ```bash
-# Stop and remove current container (data volume is preserved)
-docker stop ares-agent && docker rm ares-agent
-
-# Pull latest image
-docker pull assailai/ares-agent:latest
-
-# Start with the same docker run command from Getting Started
-docker run -d --name ares-agent \
-  --platform linux/amd64 \
-  --user root \
-  --cap-add=NET_ADMIN \
-  --device /dev/net/tun:/dev/net/tun \
-  --sysctl net.ipv4.ip_forward=1 \
-  -e ARES_RUN_AS_ROOT=true \
-  -p 8443:8443 \
-  -v ares-agent-data:/data \
-  --restart unless-stopped \
-  assailai/ares-agent:latest
+docker rm -f ares-agent
+docker pull assailai/ares-agent:<new-version>
+# re-run the docker run command from Getting started with the new tag (the volume is reused)
 ```
 
-Or with Docker Compose:
-```bash
-docker compose pull && docker compose up -d
-```
+Or with Compose: bump the pinned `image:` tag, then `docker compose pull && docker compose up -d`.
 
-Your registration, WireGuard keys, and settings are stored in the `ares-agent-data` volume and will be preserved across upgrades.
+### Auto-update (the companion updater)
 
-## Restarting
+The deployment bundles a small `ares-updater` companion that keeps the agent on the version you
+mark current in the dashboard. The **agent stays unprivileged**; only the updater holds the
+platform access, verifies the target image's signature, and applies it:
 
-After making configuration changes, restart the agent:
+- **Docker Compose** (`docker-compose.yml`): the `ares-updater` service holds the Docker socket
+  and recreates the agent container on the new version, verify-then-swap (the replacement is
+  confirmed up before the old container is removed, so a bad version never takes the agent down).
+- **Kubernetes** (`deploy/k8s/ares-agent.yaml`): the updater runs as a sidecar with a
+  ServiceAccount scoped to patch only the agent Deployment, triggering a native rolling update.
 
-**Via Docker:**
-```bash
-docker restart ares-agent
-```
+Notes:
 
-**Via Docker Compose:**
-```bash
-docker compose restart
-```
-
-> Restarting briefly disconnects the WireGuard tunnel. In-progress scans will resume once the tunnel is re-established.
+- The agent moves to the exact version the dashboard marks current (a pinned tag), so rollouts
+  are deterministic and promotable across environments.
+- Verification is **fail-closed** (`ARES_UPDATE_REQUIRE_SIGNATURE=true`): the updater refuses an
+  image it cannot cosign-verify. Set it `false` only for local/dev, before image signing is wired.
+- Only the updater touches the runtime (the Docker socket, or the scoped k8s RBAC); the agent has
+  neither. To disable auto-update, remove the updater service/sidecar and update the image
+  yourself (`docker compose pull && docker compose up -d`, or your GitOps pipeline).
 
 ## Troubleshooting
 
-### Container Won't Start
+Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 
-Ensure all required flags are present. See the [Requirements](#requirements) table — every Docker flag listed there is mandatory.
+| Symptom in the logs | Cause and fix |
+|---------------------|---------------|
+| `ARES_TOKEN is required` | No token was passed. Add `-e ARES_TOKEN=...`. |
+| `Registration token rejected` | The token expired or was already used. Generate a fresh one in Settings -> Agents. |
+| `Cannot reach Ares at ...` | The host can't reach your Ares URL on 443. Check egress / proxy rules. The agent keeps retrying. |
+| `No internal LAN auto-detected` | Auto-detection found nothing scannable. Set `ARES_NETWORKS=10.0.0.0/24,...` or edit the networks in the dashboard. |
+| `Heartbeat unauthorized` | The stored agent credentials were rejected (a decommissioned agent, or stale credentials from a kept `/data` volume). After a few consecutive rejections the agent tries to re-enroll with `ARES_TOKEN`: if the token is still unused it adopts a fresh identity and recovers; if the token is spent it keeps the current credentials and retries (it does not exit or wipe anything), so a decommissioned agent idles quietly. To give such an agent a new identity, redeploy with a fresh token. |
 
-### WireGuard Tunnel Failed to Start
+**Health check.** The container is healthy once it has registered, which is when
+`/data/agent-state.json` exists:
 
-| Cause | Solution |
-|-------|----------|
-| Not running as root | Add `--user root` flag |
-| Missing NET_ADMIN capability | Add `--cap-add=NET_ADMIN` flag |
-| Missing TUN device | Add `--device /dev/net/tun:/dev/net/tun` flag |
-| Missing IP forwarding | Add `--sysctl net.ipv4.ip_forward=1` flag |
-| Missing environment variable | Add `-e ARES_RUN_AS_ROOT=true` flag |
+```bash
+docker exec ares-agent test -f /data/agent-state.json && echo "registered"
+```
 
-### Can't Access Web Interface
-
-1. Verify container is running: `docker ps | grep ares-agent`
-2. Check container logs: `docker logs ares-agent`
-3. Verify port mapping: `docker port ares-agent`
-4. Test local access: `curl -k https://localhost:8443/health`
-
-### WireGuard Tunnel Not Connecting
-
-1. Verify outbound UDP 51820 is allowed by your firewall
-2. Check registration token hasn't expired (24-hour validity)
-3. Verify platform URL is correct
-4. Check agent logs in web interface (Dashboard > Logs)
-
-### Complete Reset
-
-Remove everything and start fresh (you'll need a new registration token):
+**Complete reset** (you'll need a new registration token):
 
 ```bash
 docker rm -f ares-agent
 docker volume rm ares-agent-data
 ```
 
-Then run the agent again using any method from [Getting Started](#getting-started).
-
-### Health Check
-
-View detailed health status:
-```bash
-docker exec ares-agent wget -qO- --no-check-certificate https://localhost:8443/health
-```
-
 ## Versioning
 
-We use [Semantic Versioning](https://semver.org/). For available versions, see the [tags on Docker Hub](https://hub.docker.com/r/assailai/ares-agent/tags).
-
-| Version | Status | Notes |
-|---------|--------|-------|
-| 2.3.x | Current | SOCKS5 proxy, improved security, bug fixes |
-| 2.0.x - 2.2.x | Legacy | Upgrade recommended |
-| 1.x | Legacy | Security vulnerabilities — upgrade immediately |
+We use [Semantic Versioning](https://semver.org/). For available versions, see the
+[tags on Docker Hub](https://hub.docker.com/r/assailai/ares-agent/tags).
 
 ## Support
 
@@ -439,15 +226,13 @@ We use [Semantic Versioning](https://semver.org/). For available versions, see t
 - **Email**: support@assailai.com
 - **Issues**: [GitHub Issues](https://github.com/assailai/ares-agent/issues)
 
-### Reporting Security Vulnerabilities
-
-If you discover a security vulnerability, please email security@assailai.com instead of opening a public issue. We take security seriously and will respond promptly.
+If you discover a security vulnerability, please email security@assailai.com instead of opening a
+public issue.
 
 ## License
 
-This software is proprietary and provided under the [Assail, Inc. Terms of Service](https://www.assailai.com/terms). Use of this agent requires an active Ares subscription.
-
-See [LICENSE](LICENSE) for details.
+This software is proprietary and provided under the [Assail, Inc. Terms of Service](https://www.assailai.com/terms).
+Use of this agent requires an active Ares subscription. See [LICENSE](LICENSE) for details.
 
 ---
 

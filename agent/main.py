@@ -1,369 +1,354 @@
-"""
-Ares Docker Agent - Main FastAPI Application
-"""
-import logging
-import ssl
-import time
-from contextlib import asynccontextmanager
-from pathlib import Path
+"""Ares Docker Agent: headless, zero-touch control-plane client.
 
-# Captured at process start (≈ container start) so heartbeats can report how long
-# this agent has been running ("uptime since connect"). Survives across the
-# heartbeat loop; resets when the container is recreated (e.g. a self-update).
+One command runs it: ``docker run -e ARES_TOKEN=... assailai/ares-agent``. The agent
+auto-detects its internal LAN(s), registers over HTTPS, then heartbeats and polls for scan
+tasks. When an internal hunt is running it opens an outbound data-plane tunnel so ares can
+reach the discovered internal hosts. There is no web UI and no interactive setup; logs
+narrate each step so an operator can self-diagnose.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import sys
+import time
+from urllib.parse import urlparse
+
+import httpx
+
+from agent import control_plane, netdetect, scan
+from agent.config import settings
+from agent.health.system_metrics import read_cpu_percent, read_memory_percent
+from agent.state import AgentState, load_state, save_state
+from agent.tunnel import TunnelManager, tunnel_url
+
+logger = logging.getLogger("ares.agent")
+
+
+class _AuthInvalidated(Exception):
+    """The control plane rejected our agent token past the retry threshold.
+
+    Raised out of the heartbeat loop so :func:`run` can drop the stale identity and
+    re-enroll with ARES_TOKEN, rather than 401-looping forever on dead credentials.
+    """
+
+# per-connect probe timeout for the TCP-connect scan.
+_PROBE_TIMEOUT = 2.0
+_REGISTER_RETRY_SECONDS = 10
+# Consecutive 401s on the heartbeat before we attempt to re-enroll. A single 401 can be a
+# momentary blip (a load balancer mid-rollover); a streak means the stored agent token was
+# rejected for real (stale kept-volume creds or a decommissioned agent). The re-enroll it
+# triggers is non-destructive (see _reenroll), so the streak only needs to filter blips, not
+# to prove a decommission: a transient 401 on a healthy agent recovers on its own.
+_REENROLL_AFTER_UNAUTHORIZED = 3
+# How long to wait before serving again after a re-enroll attempt failed (the registration
+# token is spent, or Ares was unreachable). Paces the retry so a decommissioned agent idles
+# quietly instead of busy-looping, without ever exiting the process (which would hand the
+# restart cadence to Docker and risk a fast restart storm).
+_REENROLL_RETRY_SECONDS = 60
+# hosts for which a plaintext / unverified ARES_URL is acceptable (local + staging only).
+_INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+# cadence the server hands back at register / heartbeat (sane defaults until then).
+_cadence = {"heartbeat": 30, "poll": 5}
+# captured at import (process start) so heartbeats can report uptime since connect.
 _AGENT_START_MONOTONIC = time.monotonic()
 
-from fastapi import FastAPI, Request, Depends
-from fastapi.responses import RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from starlette.middleware.sessions import SessionMiddleware
 
-from agent.config import settings
-from agent.database.models import init_database, is_setup_completed, get_config, AgentConfig
-from agent.registration.client import is_registered
-from agent.security.tls import ensure_tls_cert
-from agent.security.session import generate_secret_key, validate_session, get_admin_user
-from agent.health.checker import get_health_status
-
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper()),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
-# Background task for wake signal polling
-_wake_signal_task = None
-# Background task for hunt_agent_tasks polling (local_network_scan dispatch).
-_task_poller_task = None
-# Background task for heartbeats (status + CPU/memory telemetry).
-_heartbeat_task = None
+def _insecure_allowed(base_url: str) -> bool:
+    """ARES_INSECURE skips TLS verification, so only allow it against local / staging."""
+    host = urlparse(base_url).hostname or ""
+    return host in _INSECURE_OK_HOSTS or host.endswith(".local") or "staging" in host
 
 
-async def send_heartbeats():
-    """
-    Background task that posts a heartbeat to hunt-agent-manager every 60s.
-
-    Carries live CPU/memory telemetry + the agent version so the Ares dashboard
-    can render Resource Telemetry and keep the reported version in sync. Without
-    this loop the platform's heartbeat metadata never populates and the agent
-    detail view shows 0% CPU / 0% memory.
-    """
-    import httpx
-    import asyncio
-    from agent.health.system_metrics import read_cpu_percent, read_memory_percent
-
-    logger.info("💓 Heartbeat loop started")
-
-    while True:
-        try:
-            await asyncio.sleep(60)  # Heartbeat cadence expected by the platform
-
-            platform_url = get_config(AgentConfig.PLATFORM_URL)
-            auth_token = get_config(AgentConfig.JWT_TOKEN)
-            if not platform_url or not auth_token:
-                logger.debug("Agent not registered, skipping heartbeat")
-                continue
-
-            # CPU sampling blocks briefly (reads /proc/stat twice) — keep it off
-            # the event loop. Memory is a single cheap read.
-            cpu_percent = await asyncio.to_thread(read_cpu_percent)
-            memory_percent = read_memory_percent()
-
-            heartbeat_url = f"{platform_url.rstrip('/')}/api/v1/agent/heartbeat"
-            payload = {
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory_percent,
-                "status": "idle",
-                "agent_version": settings.agent_version,
-                "uptime_seconds": int(time.monotonic() - _AGENT_START_MONOTONIC),
-            }
-
-            try:
-                async with httpx.AsyncClient(verify=True, timeout=10.0) as client:
-                    response = await client.post(
-                        heartbeat_url,
-                        headers={"Authorization": f"Bearer {auth_token}"},
-                        json=payload,
-                    )
-                    if response.status_code == 401:
-                        logger.warning("Heartbeat: auth token invalid or expired")
-                    elif response.status_code != 200:
-                        logger.debug(f"Heartbeat: HTTP {response.status_code}")
-            except httpx.TimeoutException:
-                logger.debug("Heartbeat: timeout (server may be unavailable)")
-            except httpx.ConnectError:
-                logger.debug("Heartbeat: connection failed")
-            except Exception as e:
-                logger.debug(f"Heartbeat error: {e}")
-
-        except asyncio.CancelledError:
-            logger.info("Heartbeat loop stopped")
-            break
-        except Exception as e:
-            logger.error(f"Heartbeat loop error: {e}")
-            await asyncio.sleep(60)
+async def _register(state: AgentState, networks: list[str]) -> AgentState:
+    logger.info("Registering with %s (networks=%s)", settings.base_url, networks or "none")
+    resp = await control_plane.register(settings, networks=networks, name=settings.agent_name)
+    state.agent_id = resp["agent_id"]
+    state.agent_token = resp["agent_token"]
+    _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
+    _cadence["poll"] = resp.get("poll_interval_seconds", _cadence["poll"])
+    save_state(settings.state_path, state)
+    logger.info("Registered as agent %s", state.agent_id)
+    return state
 
 
-async def poll_wake_signals():
-    """
-    Background task that polls for wake signals from Ares.
-    If a wake signal is received, refreshes the WireGuard tunnel.
-    """
-    import httpx
-    import asyncio
-    from agent.wireguard.manager import get_manager
-
-    logger.info("🔔 Wake signal polling started")
-
-    while True:
-        try:
-            await asyncio.sleep(60)  # Poll every 60 seconds
-
-            # Check if we're registered
-            platform_url = get_config(AgentConfig.PLATFORM_URL)
-            auth_token = get_config(AgentConfig.JWT_TOKEN)
-
-            if not platform_url or not auth_token:
-                logger.debug("Agent not registered, skipping wake signal poll")
-                continue
-
-            # Build the wake signal URL
-            # Platform URL is like "https://ares.assailai.com"
-            base_url = platform_url.rstrip('/')
-            wake_url = f"{base_url}/api/v1/agent/wake-signal"
-
-            try:
-                # SECURITY: Use proper TLS verification for platform communication
-                async with httpx.AsyncClient(verify=True, timeout=10.0) as client:
-                    response = await client.get(
-                        wake_url,
-                        headers={"Authorization": f"Bearer {auth_token}"}
-                    )
-
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data.get("wake_requested"):
-                            logger.info("🔔 Received wake signal! Refreshing WireGuard tunnel...")
-                            manager = get_manager()
-                            result = await manager.wake_tunnel()
-                            logger.info(f"🔔 Tunnel wake result: {result}")
-                    elif response.status_code == 401:
-                        logger.warning("Wake signal poll: auth token invalid or expired")
-                    else:
-                        logger.debug(f"Wake signal poll: {response.status_code}")
-
-            except httpx.TimeoutException:
-                logger.debug("Wake signal poll: timeout (server may be unavailable)")
-            except httpx.ConnectError:
-                logger.debug("Wake signal poll: connection failed")
-            except Exception as e:
-                logger.debug(f"Wake signal poll error: {e}")
-
-        except asyncio.CancelledError:
-            logger.info("Wake signal polling stopped")
-            break
-        except Exception as e:
-            logger.error(f"Wake signal poll loop error: {e}")
-            await asyncio.sleep(60)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan events"""
-    global _wake_signal_task
-    import asyncio
-
-    # Startup
-    logger.info("Starting Ares Docker Agent...")
-    settings.ensure_directories()
-    init_database()
-    ensure_tls_cert()
-
-    # Auto-start WireGuard if setup is completed and agent is registered
-    if is_setup_completed() and is_registered():
-        logger.info("🔗 Setup completed and agent registered - auto-starting WireGuard tunnel...")
-        try:
-            from agent.wireguard.manager import get_manager
-            manager = get_manager()
-            tunnel_started = await manager.start()
-            if tunnel_started:
-                logger.info("✅ WireGuard tunnel auto-started successfully")
-
-                # Start SOCKS5 proxy for internal network access
-                try:
-                    from agent.socks5_proxy import get_proxy
-                    proxy = get_proxy()
-                    proxy_started = await proxy.start()
-                    if proxy_started:
-                        logger.info("✅ SOCKS5 proxy started for internal network access")
-                    else:
-                        logger.warning("⚠️ SOCKS5 proxy failed to start - internal scanning may not work")
-                except Exception as proxy_err:
-                    logger.error(f"❌ SOCKS5 proxy error: {proxy_err}")
-            else:
-                logger.warning("⚠️ WireGuard tunnel auto-start failed - manual restart may be required")
-        except Exception as e:
-            logger.error(f"❌ WireGuard auto-start error: {e}")
+def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
+    """Surface sustained trouble without spamming the log: the first failure and every
+    tenth after it are WARNING (visible at the default INFO level); the rest stay DEBUG.
+    The caller logs the matching recovery once the call succeeds again."""
+    if failures == 1 or failures % 10 == 0:
+        logger.warning("%s failing (attempt %d): %s", what, failures, exc)
     else:
-        logger.info("ℹ️ Setup not completed or not registered - skipping WireGuard auto-start")
+        logger.debug("%s failed (attempt %d): %s", what, failures, exc)
 
-    # Start wake signal polling in background
-    _wake_signal_task = asyncio.create_task(poll_wake_signals())
 
-    # Start hunt-agent-task polling — dispatches local_network_scan tasks
-    # to the local-LAN scanner. No-op until the agent is registered.
-    global _task_poller_task
-    from agent.scanner.task_poller import poll_loop as poll_tasks_loop
-    _task_poller_task = asyncio.create_task(poll_tasks_loop())
+def _write_update_target(version: str) -> None:
+    """Record the version the companion updater should move this agent to.
 
-    # Start heartbeat loop — reports status + CPU/memory telemetry to the
-    # platform. No-op until the agent is registered.
-    global _heartbeat_task
-    _heartbeat_task = asyncio.create_task(send_heartbeats())
-
-    logger.info("Ares Docker Agent started successfully")
-
-    yield
-
-    # Shutdown
-    logger.info("Shutting down Ares Docker Agent...")
-
-    # Stop wake signal polling
-    if _wake_signal_task:
-        _wake_signal_task.cancel()
-        try:
-            await _wake_signal_task
-        except asyncio.CancelledError:
-            pass
-
-    # Stop task polling
-    if _task_poller_task:
-        _task_poller_task.cancel()
-        try:
-            await _task_poller_task
-        except asyncio.CancelledError:
-            pass
-
-    # Stop heartbeat loop
-    if _heartbeat_task:
-        _heartbeat_task.cancel()
-        try:
-            await _heartbeat_task
-        except asyncio.CancelledError:
-            pass
-
-    # Stop SOCKS5 proxy if running
+    The updater is a separate, privileged container that reads this from the shared data
+    dir and applies it (recreate / rolling update); the agent itself never touches the
+    container runtime. Best-effort: if the shared dir is not mounted (no updater deployed),
+    log at debug and carry on."""
+    path = settings.update_target_path
     try:
-        from agent.socks5_proxy import get_proxy
-        proxy = get_proxy()
-        if proxy.is_running():
-            await proxy.stop()
-            logger.info("✅ SOCKS5 proxy stopped")
-    except Exception as e:
-        logger.warning(f"SOCKS5 proxy stop error: {e}")
-
-    # Stop WireGuard if running
-    from agent.wireguard.manager import get_manager
-    manager = get_manager()
-    if manager.is_running():
-        await manager.stop()
-    logger.info("Shutdown complete")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"version": version}))
+        tmp.replace(path)
+    except OSError as exc:
+        logger.debug("could not write update target (%s); is the shared volume mounted?", exc)
 
 
-# Create FastAPI app
-app = FastAPI(
-    title="Ares Docker Agent",
-    description="Customer-deployable agent for internal API scanning",
-    version=settings.agent_version,
-    docs_url=None,  # Disable Swagger UI
-    redoc_url=None,  # Disable ReDoc
-    lifespan=lifespan
-)
-
-# Session middleware
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=settings.session_secret_key or generate_secret_key(),
-    max_age=settings.session_expire_hours * 3600,
-    same_site="strict",
-    https_only=True
-)
-
-# Mount static files
-static_path = Path(__file__).parent.parent / "web" / "static"
-if static_path.exists():
-    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-
-# Templates
-templates_path = Path(__file__).parent.parent / "web" / "templates"
-templates = Jinja2Templates(directory=str(templates_path))
-
-
-# Include routers
-from web.routers import auth, setup, dashboard, proxy
-
-app.include_router(auth.router)
-app.include_router(setup.router)
-app.include_router(dashboard.router)
-app.include_router(proxy.router)  # HTTP proxy for remote scanning
-
-
-# Health check endpoint (no auth required)
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Docker HEALTHCHECK"""
-    return get_health_status()
-
-
-# Root redirect
-@app.get("/")
-async def root(request: Request):
-    """Redirect to appropriate page based on state"""
-    session_id = request.session.get("session_id")
-
-    # Check if logged in
-    if not session_id or not validate_session(session_id):
-        return RedirectResponse(url="/login", status_code=302)
-
-    # Check if setup is completed
-    if not is_setup_completed():
-        return RedirectResponse(url="/setup", status_code=302)
-
-    # Check if password change is required
-    admin = get_admin_user()
-    if admin and admin.must_change_password:
-        return RedirectResponse(url="/change-password", status_code=302)
-
-    return RedirectResponse(url="/dashboard", status_code=302)
+async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
+    failures = 0
+    unauthorized = 0
+    online_announced = False
+    while True:
+        try:
+            # CPU sampling reads the cgroup counter twice on the first call; keep it off the loop.
+            cpu_percent = await asyncio.to_thread(read_cpu_percent)
+            resp = await control_plane.heartbeat(
+                settings,
+                state.agent_token or "",
+                cpu_percent=cpu_percent,
+                memory_percent=read_memory_percent(),
+                uptime_seconds=int(time.monotonic() - _AGENT_START_MONOTONIC),
+            )
+            # Announce "online" only once the control plane has actually accepted a beat, so
+            # the log never claims the agent is up while its credentials are in fact rejected.
+            if not online_announced:
+                logger.info(
+                    'Agent online, visible in the dashboard as "%s".',
+                    settings.agent_name or "this host",
+                )
+                online_announced = True
+            if failures:
+                logger.info("Heartbeat recovered after %d failed attempt(s).", failures)
+            failures = 0
+            unauthorized = 0
+            _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
+            tunnel.sync(bool(resp.get("tunnel_required")))
+            if resp.get("restart_requested"):
+                logger.warning("Restart requested from dashboard; exiting for container restart.")
+                os._exit(0)
+            if resp.get("update_pending") and resp.get("latest_version"):
+                _write_update_target(resp["latest_version"])
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            failures += 1
+            if exc.response.status_code == 401:
+                unauthorized += 1
+                if unauthorized >= _REENROLL_AFTER_UNAUTHORIZED:
+                    # Sustained rejection: the stored token is dead. Surface it so run() can
+                    # drop the identity and re-enroll instead of 401-looping forever.
+                    raise _AuthInvalidated from exc
+                logger.warning(
+                    "Heartbeat unauthorized (%d/%d): the stored agent credentials look stale or "
+                    "the agent was decommissioned; will re-enroll with ARES_TOKEN if this persists.",
+                    unauthorized,
+                    _REENROLL_AFTER_UNAUTHORIZED,
+                )
+            else:
+                _log_repeated_failure("heartbeat", failures, exc)
+        except Exception as exc:  # noqa: BLE001 - keep heartbeating through any transient error
+            failures += 1
+            _log_repeated_failure("heartbeat", failures, exc)
+        await asyncio.sleep(_cadence["heartbeat"])
 
 
-def run_server():
-    """Run the FastAPI server with HTTPS"""
-    import uvicorn
+async def _run_task(token: str, task: dict) -> None:
+    task_id = task["id"]
+    cidr = task.get("target_network")
+    config = task.get("tool_config") or {}
+    ports = config.get("ports") or list(scan.DEFAULT_PORTS)
+    if not cidr:
+        await control_plane.task_failed(settings, token, task_id, "missing target_network")
+        return
+    await control_plane.task_started(settings, token, task_id)
+    try:
+        logger.info("Scanning %s on ports %s", cidr, ports)
+        hosts = await scan.scan_cidr(cidr, ports, timeout=_PROBE_TIMEOUT)
+        await control_plane.task_completed(settings, token, task_id, hosts)
+        logger.info("Reported %d discovered host(s) for %s", len(hosts), cidr)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - report any scan failure instead of dropping the task
+        logger.error("Scan task %s failed: %s", task_id, exc)
+        await control_plane.task_failed(settings, token, task_id, f"{type(exc).__name__}: {exc}")
 
-    # Ensure TLS certificate exists
-    ensure_tls_cert()
 
-    # SSL context
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(
-        certfile=str(settings.tls_cert_path),
-        keyfile=str(settings.tls_key_path)
-    )
-    ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+async def _poll_loop(state: AgentState) -> None:
+    failures = 0
+    while True:
+        try:
+            tasks = await control_plane.poll_tasks(settings, state.agent_token or "")
+            if failures:
+                logger.info("Task polling recovered after %d failed attempt(s).", failures)
+                failures = 0
+            for task in tasks:
+                await _run_task(state.agent_token or "", task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep polling through any transient error
+            failures += 1
+            _log_repeated_failure("task poll", failures, exc)
+        await asyncio.sleep(_cadence["poll"])
 
-    # Run server
-    uvicorn.run(
-        "agent.main:app",
-        host=settings.host,
-        port=settings.port,
-        ssl_certfile=str(settings.tls_cert_path),
-        ssl_keyfile=str(settings.tls_key_path),
-        log_level=settings.log_level.lower()
-    )
+
+async def _enroll(networks: list[str]) -> AgentState | None:
+    """Return a registered state, re-using a stored identity or enrolling with ARES_TOKEN.
+
+    Retries transient connectivity errors forever (the control plane may not be reachable
+    yet); returns None only when the registration token is rejected outright (expired or
+    already used), which is fatal and the caller surfaces to the operator.
+    """
+    state = load_state(settings.state_path)
+    while not state.registered:
+        try:
+            state = await _register(state, networks)
+        except control_plane.RegistrationRejected:
+            logger.error(
+                "Registration token rejected (expired or already used). "
+                "Generate a fresh token in the Ares dashboard."
+            )
+            return None
+        except (httpx.HTTPError, OSError) as exc:
+            logger.error(
+                "Cannot reach Ares at %s: %s. Retrying in %ds.",
+                settings.base_url,
+                exc,
+                _REGISTER_RETRY_SECONDS,
+            )
+            await asyncio.sleep(_REGISTER_RETRY_SECONDS)
+    return state
+
+
+async def _reenroll(networks: list[str]) -> AgentState | None:
+    """Mint a fresh identity with ARES_TOKEN after the stored credentials were rejected.
+
+    Non-destructive by design: this enrolls into a brand-new state and only persists it on
+    success, so the caller can keep the existing credentials if this fails. It succeeds only
+    when ARES_TOKEN is still an unused, valid registration token (the kept-volume case, where
+    the stored token was minted for a previous container). It returns None when the token is
+    already spent (a decommissioned agent, or a healthy agent that merely hit a transient 401)
+    or Ares is unreachable, so a blanket 401 never strands the agent on a one-time token.
+    """
+    try:
+        return await _register(AgentState(), networks)
+    except control_plane.RegistrationRejected:
+        return None
+    except (httpx.HTTPError, OSError) as exc:
+        logger.debug("re-enrollment could not reach Ares: %s", exc)
+        return None
+
+
+async def _serve(state: AgentState, tunnel: TunnelManager) -> None:
+    """Run the heartbeat and task-poll loops until one exits. If either raises (e.g. the
+    heartbeat raises _AuthInvalidated on a sustained 401), cancel its sibling and re-raise
+    so the caller decides whether to re-enroll or shut down."""
+    tasks = {
+        asyncio.create_task(_heartbeat_loop(state, tunnel)),
+        asyncio.create_task(_poll_loop(state)),
+    }
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            raise exc
+
+
+async def run() -> int:
+    _configure_logging()
+    if not settings.token:
+        logger.error(
+            "ARES_TOKEN is required. Generate a registration token in the Ares dashboard "
+            "(Settings -> Agents) and pass it as -e ARES_TOKEN=..."
+        )
+        return 1
+    if settings.insecure and not _insecure_allowed(settings.base_url):
+        logger.error(
+            "ARES_INSECURE=true skips TLS verification and is only allowed for local / staging "
+            "URLs, not %s. Refusing to start.",
+            settings.base_url,
+        )
+        return 1
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    networks = settings.network_overrides() or netdetect.detect_networks()
+    if not networks:
+        logger.warning(
+            "No internal LAN auto-detected and ARES_NETWORKS is unset; registering with no "
+            "networks. Set ARES_NETWORKS=10.0.0.0/24,... or edit them in the dashboard."
+        )
+
+    state = await _enroll(networks)
+    if state is None:
+        return 1
+
+    # Serve forever, self-healing across credential rejections. A sustained 401 means the
+    # stored token was rejected (stale kept-volume creds, or a decommissioned agent); we try
+    # to re-enroll with ARES_TOKEN but never discard the current credentials first, and never
+    # exit the process over it. Re-enrollment replaces the identity only on success (a fresh,
+    # unused token), so a transient 401 on a healthy agent recovers on its own and a spent
+    # token leaves the agent intact rather than crash-looping.
+    while True:
+        tunnel = TunnelManager(
+            tunnel_url(settings.base_url),
+            state.agent_token or "",
+            networks,
+            insecure=settings.insecure,
+        )
+        try:
+            await _serve(state, tunnel)
+        except _AuthInvalidated:
+            logger.warning(
+                "Control plane rejected the stored agent credentials; attempting to "
+                "re-enroll with ARES_TOKEN."
+            )
+            reenrolled = await _reenroll(networks)
+            if reenrolled is not None:
+                state = reenrolled
+                logger.info("Re-enrolled with a fresh agent identity.")
+            else:
+                logger.error(
+                    "Could not re-enroll: the registration token is spent or Ares is "
+                    "unreachable. Keeping the current credentials and retrying. If this agent "
+                    "was decommissioned, stop the container; to give it a new identity, "
+                    "redeploy with a fresh ARES_TOKEN."
+                )
+                await asyncio.sleep(_REENROLL_RETRY_SECONDS)
+        else:
+            return 0  # both loops ended without error: nothing left to do
+        finally:
+            tunnel.stop()
+
+
+def main() -> None:
+    try:
+        raise SystemExit(asyncio.run(run()))
+    except KeyboardInterrupt:
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    run_server()
+    main()
