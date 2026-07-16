@@ -4,11 +4,13 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 2.3.x   | :white_check_mark: |
-| 2.0.x - 2.2.x | :x: (security vulnerabilities - upgrade immediately) |
-| 1.x     | :x: |
+| 3.1.x   | :white_check_mark: |
+| 3.0.x   | :white_check_mark: |
+| < 3.0   | :x:                |
 
-> **IMPORTANT**: Version 2.3.0 contains critical security fixes. All users should upgrade immediately.
+> **IMPORTANT**: Only the current 3.x line receives security fixes. The companion updater
+> automatically rolls deployments to the version the platform marks current, so running the
+> latest 3.x is the supported configuration. Anything older than 3.0 should be upgraded.
 
 ## Reporting a Vulnerability
 
@@ -53,6 +55,7 @@ The Ares Agent implements multiple layers of security:
 - Multi-stage builds with minimal attack surface
 - No secrets baked into images
 - Compatible with `--security-opt no-new-privileges:true`
+- Images signed with keyless cosign (Sigstore/OIDC); the companion updater cosign-verifies the target digest before applying an update
 - Regular Docker Scout vulnerability scanning
 
 ### Authentication
