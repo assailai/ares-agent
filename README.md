@@ -37,14 +37,20 @@ host privileges to grant.
 
 ## Getting started
 
-You need a **registration token** first. In the Ares dashboard go to **Settings -> Agents**,
-generate a token (it starts with `ares_agt_`), and copy it. Tokens are one-time: each enrolls a
-single agent.
+**Get your install command from the Ares platform, not by hand.** In Ares, open
+**Settings -> Agents -> Deploy an agent**. It generates a ready-to-run command with your one-time
+registration token, the correct control-plane URL for your environment, and the agent name already
+filled in. Copy that command and run it on the host you want to deploy on; that is the whole setup.
+The token is single-use (one agent per token), and the dashboard pins the current release version
+for you.
+
+The options below just show the *shape* of what the dashboard hands you (each needs the
+`ARES_TOKEN` it issues), in case you want to adapt it for Compose, Kubernetes, or your own tooling.
 
 ### Option A: Docker run
 
-Pin to a specific version (the dashboard's deploy command shows the current release under
-Settings -> Agents); avoid `:latest` so deploys are reproducible.
+The dashboard's Deploy flow gives you exactly this command, filled in. Pin to a specific version
+(the deploy command shows the current release); avoid `:latest` so deploys are reproducible.
 
 ```bash
 docker run -d --name ares-agent \
@@ -118,15 +124,10 @@ The agent is configured entirely through environment variables (all prefixed `AR
 |----------|---------|-------------|
 | `ARES_TOKEN` | *(required)* | One-time registration token from the dashboard. The agent exits with a clear message if it is missing. |
 | `ARES_URL` | `https://api.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
-| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection entirely. You can also edit the networks in the dashboard after enrollment. |
-| `ARES_SCAN_SCOPE` | `supernet16` | How broadly to scan when `ARES_NETWORKS` is unset. `supernet16` widens each auto-detected subnet to its enclosing /16 (scan the whole local network); `attached` keeps just the interface prefix; `rfc1918` sweeps the private ranges (10/8, 172.16/12, 192.168/16), each capped at the per-task host limit (`ARES_SCAN_MAX_HOSTS`, ~a /14, and logged when hit) so a huge range like 10/8 is only partially covered — opt-in, slow; `host-all` adds the docker bridge subnets and the host loopback (for a container on the host network, see below). |
+| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection. You can also edit the networks in the dashboard after enrollment. |
 | `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
 | `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
-| `ARES_SCAN_CONCURRENCY` | `2048` | Max simultaneous TCP connects. Clamped at startup to what the file-descriptor limit allows. |
-| `ARES_SCAN_CONNECT_TIMEOUT` | `1.0` | Per-connect timeout (seconds) for the full port sweep on a live host. |
-| `ARES_SCAN_DISCOVERY_TIMEOUT` | `0.5` | Per-connect timeout (seconds) for the fast liveness sweep across every host. |
-| `ARES_SCAN_MAX_HOSTS` | `262144` | Safety ceiling on hosts scanned per task; truncation beyond this is logged, never silent. |
 
 ### Volume
 
@@ -144,25 +145,7 @@ The agent only makes **outbound** connections, all to your Ares URL:
 | Outbound | 443 | WebSocket (WSS) | Data-plane tunnel, opened only while a hunt is running |
 
 **No inbound firewall rules are required.** Locally, the agent connects to the internal hosts on
-whatever ports your hunt targets.
-
-### Scanning the host's own services and docker networks
-
-A container on the default **bridge** network only sees its own namespace: `localhost` is the
-container, not the host, so it can neither reach services bound to the host's `localhost` nor
-auto-detect the real LAN (it sees the docker bridge instead). To scan the host's localhost, the
-LAN, **and** the docker networks in one go, run the agent on the **host network** (Linux) and pick
-the `host-all` scope:
-
-```bash
-docker run -d --name ares-agent --network host \
-  -e ARES_TOKEN=ares_agt_... -e ARES_SCAN_SCOPE=host-all \
-  assailai/ares-agent
-```
-
-`host-all` sweeps the attached LAN (widened to /16), the docker bridge subnets, and `127.0.0.1/32`.
-On Docker Desktop (Mac/Windows) host networking does not expose the host's localhost; set
-`ARES_NETWORKS` explicitly there instead.
+whatever ports your hunt targets (commonly 80, 443, 8080, 8443).
 
 ## Security
 
@@ -189,15 +172,6 @@ docker pull assailai/ares-agent:<new-version>
 ```
 
 Or with Compose: bump the pinned `image:` tag, then `docker compose pull && docker compose up -d`.
-
-### Heads-up for 3.1.0: wider default scan scope
-
-3.1.0 makes `supernet16` the default scope. When `ARES_NETWORKS` is unset, the agent now scans
-the enclosing **/16** of each auto-detected subnet, not just that subnet — so an agent that was
-scanning `192.168.1.0/24` will, after upgrading, scan `192.168.0.0/16` (~65k hosts), including
-addresses outside its own /24. This is intentional for internal asset discovery. To keep the
-pre-3.1.0 behaviour, pin `ARES_SCAN_SCOPE=attached` (or set `ARES_NETWORKS` explicitly). The
-agent logs the exact networks it will scan at startup.
 
 ### Auto-update (the companion updater)
 
