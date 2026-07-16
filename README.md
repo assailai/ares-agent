@@ -118,10 +118,15 @@ The agent is configured entirely through environment variables (all prefixed `AR
 |----------|---------|-------------|
 | `ARES_TOKEN` | *(required)* | One-time registration token from the dashboard. The agent exits with a clear message if it is missing. |
 | `ARES_URL` | `https://api.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
-| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection. You can also edit the networks in the dashboard after enrollment. |
+| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection entirely. You can also edit the networks in the dashboard after enrollment. |
+| `ARES_SCAN_SCOPE` | `supernet16` | How broadly to scan when `ARES_NETWORKS` is unset. `supernet16` widens each auto-detected subnet to its enclosing /16 (scan the whole local network); `attached` keeps just the interface prefix; `rfc1918` scans all private space (opt-in, slow). |
 | `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
 | `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
+| `ARES_SCAN_CONCURRENCY` | `2048` | Max simultaneous TCP connects. Clamped at startup to what the file-descriptor limit allows. |
+| `ARES_SCAN_CONNECT_TIMEOUT` | `1.0` | Per-connect timeout (seconds) for the full port sweep on a live host. |
+| `ARES_SCAN_DISCOVERY_TIMEOUT` | `0.5` | Per-connect timeout (seconds) for the fast liveness sweep across every host. |
+| `ARES_SCAN_MAX_HOSTS` | `262144` | Safety ceiling on hosts scanned per task; truncation beyond this is logged, never silent. |
 
 ### Volume
 

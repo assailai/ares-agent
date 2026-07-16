@@ -218,3 +218,116 @@ async def test_run_adopts_a_fresh_identity_on_reenroll(
 
     # served the stale identity first, then the freshly re-enrolled one.
     assert served == [stale, fresh]
+
+
+# --- scan task orchestration: progress + live streaming + auto-scope ----------------------------
+
+
+async def test_run_task_reports_progress_and_streams_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # _run_task must feed scan_cidr's callbacks straight to the control plane: percentages via
+    # progress posts, and discovered hosts streamed as they are found, with the authoritative full
+    # list sent on completion.
+    started: list[str] = []
+    progress: list[tuple[int, list[dict] | None]] = []
+    completed: list[list[dict]] = []
+    host = {"ip": "10.0.0.5", "port": 80, "service": "http", "protocol": "tcp", "evidence": "x"}
+
+    async def _task_started(_s, _t, task_id):
+        started.append(task_id)
+
+    async def _task_progress(_s, _t, _task_id, *, percent, discovered_hosts=None, **_kw):
+        progress.append((percent, discovered_hosts))
+
+    async def _task_completed(_s, _t, _task_id, hosts):
+        completed.append(hosts)
+
+    async def _fake_scan(cidr, ports, **kwargs):
+        assert ports == [80]  # tool_config.ports is honoured
+        await kwargs["on_progress"](50)
+        await kwargs["on_hosts"]([host])
+        await kwargs["on_progress"](100)
+        return [host]
+
+    monkeypatch.setattr(main.control_plane, "task_started", _task_started)
+    monkeypatch.setattr(main.control_plane, "task_progress", _task_progress)
+    monkeypatch.setattr(main.control_plane, "task_completed", _task_completed)
+    monkeypatch.setattr(main.scan, "scan_cidr", _fake_scan)
+
+    await main._run_task(
+        "tok",
+        {"id": "t1", "target_network": "10.0.0.0/24", "tool_config": {"ports": [80]}},
+    )
+
+    assert started == ["t1"]
+    assert completed == [[host]]
+    percents = [p for p, _ in progress]
+    assert 50 in percents and 100 in percents
+    assert any(hosts == [host] for _, hosts in progress)  # a chunk was streamed live
+
+
+async def test_run_task_survives_a_failed_progress_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A dropped progress post is best-effort: it must never fail the scan or block completion.
+    completed: list[list[dict]] = []
+
+    async def _ok(*_a, **_k):
+        return None
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("network blip")
+
+    async def _task_completed(_s, _t, _task_id, hosts):
+        completed.append(hosts)
+
+    async def _fake_scan(cidr, ports, **kwargs):
+        await kwargs["on_progress"](25)  # this post raises, and must be swallowed
+        return []
+
+    monkeypatch.setattr(main.control_plane, "task_started", _ok)
+    monkeypatch.setattr(main.control_plane, "task_progress", _boom)
+    monkeypatch.setattr(main.control_plane, "task_completed", _task_completed)
+    monkeypatch.setattr(main.scan, "scan_cidr", _fake_scan)
+
+    await main._run_task("tok", {"id": "t1", "target_network": "10.0.0.0/24"})
+
+    assert completed == [[]]  # completed cleanly despite the progress post blowing up
+
+
+async def test_run_task_fails_without_a_target_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    failed: list[str] = []
+
+    async def _task_failed(_s, _t, _task_id, reason):
+        failed.append(reason)
+
+    async def _should_not_run(*_a, **_k):
+        raise AssertionError("scan must not start without a target network")
+
+    monkeypatch.setattr(main.control_plane, "task_failed", _task_failed)
+    monkeypatch.setattr(main.scan, "scan_cidr", _should_not_run)
+
+    await main._run_task("tok", {"id": "t1"})
+
+    assert failed == ["missing target_network"]
+
+
+async def test_run_advertises_auto_scoped_networks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # With ARES_NETWORKS unset, run() advertises whatever netdetect.scan_targets resolves for the
+    # configured scope -- the operator never has to type a CIDR.
+    captured: dict[str, list[str]] = {}
+
+    async def _enroll(networks: list[str]) -> AgentState:
+        captured["networks"] = networks
+        raise asyncio.CancelledError  # stop run() right after it computes the target networks
+
+    monkeypatch.setattr(main, "_enroll", _enroll)
+    monkeypatch.setattr(main.netdetect, "scan_targets", lambda scope: ["10.9.0.0/16"])
+    monkeypatch.setattr(main.settings, "token", "ares_agt_x")
+    monkeypatch.setattr(main.settings, "insecure", False)
+    monkeypatch.setattr(main.settings, "networks", "")
+    monkeypatch.setattr(main.settings, "data_dir", tmp_path)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main.run()
+
+    assert captured["networks"] == ["10.9.0.0/16"]

@@ -88,12 +88,17 @@ spec:
           envFrom:
             - secretRef:
                 name: ares-agent
+          # The concurrent-connect scanner wants many file descriptors. Kubernetes has no
+          # per-container nofile knob, so the agent raises its own RLIMIT_NOFILE soft limit at
+          # startup toward the runtime's hard limit (containerd defaults are high); no capability
+          # or privilege is required. To scan very large ranges (e.g. ARES_SCAN_SCOPE=rfc1918),
+          # raise the runtime's default nofile hard limit on the node.
           volumeMounts:
             - name: data
               mountPath: /data
           resources:
             requests: { memory: "128Mi", cpu: "50m" }
-            limits: { memory: "256Mi", cpu: "250m" }
+            limits: { memory: "512Mi", cpu: "500m" }
           livenessProbe:
             exec:
               command: ["test", "-f", "/data/agent-state.json"]

@@ -20,10 +20,16 @@ services:
     hostname: ares-agent
     volumes:
       - ares-agent-data:/data
+    # Headroom for the concurrent-connect scanner (still non-root, no added capabilities).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token from the dashboard}
       # - ARES_URL=https://api.assailai.com        # override when self-hosting
       # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override LAN auto-detection
+      # - ARES_SCAN_SCOPE=supernet16               # supernet16 (default) | attached | rfc1918
     restart: unless-stopped
 
   ares-updater:

@@ -106,6 +106,35 @@ async def task_started(settings: Settings, token: str, task_id: str) -> None:
     resp.raise_for_status()
 
 
+async def task_progress(
+    settings: Settings,
+    token: str,
+    task_id: str,
+    *,
+    percent: int,
+    discovered_hosts: list[dict] | None = None,
+    hosts_scanned: int | None = None,
+    hosts_total: int | None = None,
+) -> None:
+    """Report scan progress mid-task: a percentage plus any hosts discovered since the last call.
+
+    Carries both signals in one request so the control plane can advance the progress bar and
+    surface hosts live. Best-effort at the caller: a dropped progress post never fails the scan
+    (``task_completed`` sends the authoritative full list at the end)."""
+    body: dict[str, object] = {"percent": percent}
+    if discovered_hosts:
+        body["discovered_hosts"] = discovered_hosts
+    if hosts_scanned is not None:
+        body["hosts_scanned"] = hosts_scanned
+    if hosts_total is not None:
+        body["hosts_total"] = hosts_total
+    async with _client(settings) as client:
+        resp = await client.post(
+            f"/api/v1/agent/tasks/{task_id}/progress", json=body, headers=_auth(token)
+        )
+    resp.raise_for_status()
+
+
 async def task_completed(
     settings: Settings, token: str, task_id: str, discovered_hosts: list[dict]
 ) -> None:

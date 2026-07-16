@@ -4,13 +4,26 @@ Reports only RFC1918 networks on real interfaces. Container, VPN, and virtual in
 (docker0, br-*, veth*, wg*, tun*, loopback) are excluded so we never advertise the
 container bridge (172.17.0.0/16) as a target. The parsing is split from the OS calls so
 the filtering logic is unit-testable.
+
+``scan_targets(scope)`` turns the detected attached subnets into the CIDRs the agent actually
+advertises and scans, so an operator never has to set ARES_NETWORKS: ``supernet16`` (the default)
+widens each attached subnet to its enclosing /16 to sweep the flat local network, ``attached``
+keeps the interface prefixes as-is, and ``rfc1918`` scans all private space (opt-in, slow).
 """
 
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import subprocess
+
+logger = logging.getLogger("ares.agent.netdetect")
+
+# The private space, used by the (opt-in) ``rfc1918`` scope.
+_RFC1918 = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+VALID_SCOPES = ("attached", "supernet16", "rfc1918")
+DEFAULT_SCOPE = "supernet16"
 
 # interfaces that are never a customer LAN.
 _SKIP_IFACE_PREFIXES = (
@@ -99,3 +112,32 @@ def detect_networks() -> list[str]:
         if nets:
             return nets
     return []
+
+
+def apply_scope(attached: list[str], scope: str) -> list[str]:
+    """Widen detected attached subnets into scan targets by breadth (pure, unit-testable).
+
+    Overlapping / duplicate results are collapsed so a /16 supernet never coexists with a /24 it
+    already covers. An unknown scope falls back to the default with a warning.
+    """
+    if scope not in VALID_SCOPES:
+        logger.warning("Unknown ARES_SCAN_SCOPE=%r; falling back to %s.", scope, DEFAULT_SCOPE)
+        scope = DEFAULT_SCOPE
+
+    if scope == "rfc1918":
+        nets = [ipaddress.ip_network(c) for c in _RFC1918]
+    else:
+        nets = []
+        for cidr in attached:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if scope == "supernet16" and net.prefixlen > 16:
+                net = net.supernet(new_prefix=16)
+            nets.append(net)
+
+    collapsed = ipaddress.collapse_addresses(n for n in nets if isinstance(n, ipaddress.IPv4Network))
+    return [str(n) for n in collapsed]
+
+
+def scan_targets(scope: str = DEFAULT_SCOPE) -> list[str]:
+    """The CIDRs to advertise + scan, derived from auto-detected LANs at the given breadth."""
+    return apply_scope(detect_networks(), scope)
