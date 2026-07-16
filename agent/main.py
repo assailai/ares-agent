@@ -36,13 +36,15 @@ class _AuthInvalidated(Exception):
     re-enroll with ARES_TOKEN, rather than 401-looping forever on dead credentials.
     """
 
-# Scan concurrency resolved at startup against the file-descriptor budget (see
+# scan concurrency resolved at startup against the file-descriptor budget (see
 # _resolve_scan_limits); per-connect timeouts + range breadth come from settings.
 _scan_limits = {"concurrency": 512}
-# File-descriptor target so high scan concurrency has enough sockets (headroom left for the
+# file-descriptor target so high scan concurrency has enough sockets (headroom left for the
 # control-plane client and the data-plane tunnel).
 _FD_TARGET = 65536
 _FD_RESERVE = 256
+# floor so a tiny fd budget still leaves the scanner usable.
+_MIN_CONCURRENCY = 64
 _REGISTER_RETRY_SECONDS = 10
 # Consecutive 401s on the heartbeat before we attempt to re-enroll. A single 401 can be a
 # momentary blip (a load balancer mid-rollover); a streak means the stored agent token was
@@ -84,7 +86,7 @@ def _resolve_scan_limits() -> None:
             soft = target
     except (OSError, ValueError) as exc:
         logger.debug("could not raise file-descriptor limit: %s", exc)
-    concurrency = max(64, min(settings.scan_concurrency, soft - _FD_RESERVE))
+    concurrency = max(_MIN_CONCURRENCY, min(settings.scan_concurrency, soft - _FD_RESERVE))
     _scan_limits["concurrency"] = concurrency
     logger.info("Scan concurrency=%d (file-descriptor soft limit=%d)", concurrency, soft)
 
@@ -203,10 +205,10 @@ async def _run_task(token: str, task: dict) -> None:
         return
     await control_plane.task_started(settings, token, task_id)
 
-    last_pct = {"value": 0}
+    last_pct = 0
 
     async def _report(percent: int, hosts: list[dict] | None = None) -> None:
-        # Best-effort: progress + streamed hosts are a live-UX nicety, never allowed to fail the
+        # best-effort: progress + streamed hosts are a live-UX nicety, never allowed to fail the
         # scan. task_completed sends the authoritative full list, and the server de-dups it.
         try:
             await control_plane.task_progress(
@@ -216,11 +218,12 @@ async def _run_task(token: str, task: dict) -> None:
             logger.debug("progress report for task %s failed: %s", task_id, exc)
 
     async def _on_progress(percent: int) -> None:
-        last_pct["value"] = percent
+        nonlocal last_pct
+        last_pct = percent
         await _report(percent)
 
     async def _on_hosts(chunk: list[dict]) -> None:
-        await _report(last_pct["value"], chunk)
+        await _report(last_pct, chunk)
 
     try:
         logger.info("Scanning %s across %d port(s)", cidr, len(ports))

@@ -3,18 +3,12 @@
 Deliberately dependency-free (no masscan, no root, no raw sockets) so the agent runs
 anywhere a container can, and so the control-plane loop is testable on a laptop.
 
-It is two-phase, chunked, and streaming so it stays fast at /16 scale:
-
-* the target CIDR is split into /24 chunks (bounded memory, incremental progress);
-* **phase 1 (host discovery)** probes a few high-signal ports across every host in a chunk to
-  learn which hosts are alive -- a port that *connects* or is *refused* means the host answered,
-  a timeout / unreachable means it did not;
-* **phase 2 (port sweep)** probes the full port list only against the hosts phase 1 found alive.
-
-Dead hosts -- the bulk of any large range -- are dropped after a handful of short probes instead
-of the full port list, so a /24 finishes in seconds and a mostly-dead /16 in a couple of minutes.
-Progress and discovered hosts are streamed through optional callbacks so the control plane can
-show a live percentage and surface hosts as they are found.
+Two phases keep it quick at /16 scale. Phase 1 probes a few common ports across every host to
+see which answer at all -- a connect or a refusal both mean the host is up, only a timeout or
+unreachable means it is not. Phase 2 then sweeps the full port list against just the live hosts,
+so the dead majority of a large range costs a handful of probes rather than the whole list. The
+range is walked a /24 at a time, and progress and discovered hosts come back through optional
+callbacks so the control plane can show a live percentage.
 """
 
 from __future__ import annotations
@@ -27,9 +21,8 @@ from collections.abc import Awaitable, Callable, Sequence
 
 logger = logging.getLogger("ares.agent.scan")
 
-# Curated top ~100 TCP ports: the services most worth knowing about on an internal network
-# (web, databases, remote access, file shares, mail, message queues, admin panels). 3000 is
-# included so OWASP Juice Shop and Grafana-style dev services are found out of the box.
+# curated top ~100 TCP ports for internal networks: web, databases, remote access, file shares,
+# mail, message queues, admin panels. 3000 covers Juice Shop / Grafana-style dev apps.
 TOP_PORTS: tuple[int, ...] = (
     21, 22, 23, 25, 26, 37, 53, 80, 81, 88, 110, 111, 113, 119, 135, 139, 143, 161, 179, 199,
     389, 427, 443, 444, 445, 465, 513, 514, 515, 543, 544, 548, 554, 587, 623, 631, 636, 873,
@@ -38,17 +31,17 @@ TOP_PORTS: tuple[int, ...] = (
     5985, 5986, 6379, 6443, 7001, 8000, 8008, 8009, 8080, 8081, 8088, 8180, 8443, 8500, 8888,
     9000, 9042, 9092, 9200, 9300, 9418, 10000, 11211, 15672, 27017, 27018, 50000,
 )
-# Lean liveness set for phase 1: the ports most likely to answer on *some* host in a range.
+# lean liveness set for phase 1: the ports most likely to answer on some host in a range.
 DISCOVERY_PORTS: tuple[int, ...] = (80, 443, 22, 445, 3389, 8080)
-# The port list a task sweeps when the control plane sends none (server usually overrides).
+# the port list a task sweeps when the control plane sends none (server usually overrides).
 DEFAULT_PORTS: tuple[int, ...] = TOP_PORTS
-# Hosts are scanned a /24 at a time: the natural unit, and small enough to bound memory.
+# hosts are scanned a /24 at a time: the natural unit, and small enough to bound memory.
 CHUNK_PREFIX = 24
-# Safety ceiling on hosts in a single task. A full /16 (~65k) is well within this; a scope that
+# safety ceiling on hosts in a single task. A full /16 (~65k) is well within this; a scope that
 # resolves to something enormous (e.g. an explicit 10/8) is truncated -- and *logged*, never
 # silently -- rather than exhausting the box.
 MAX_HOSTS = 262_144  # a /14
-# Fast per-connect timeout for the phase-1 liveness sweep (dead hosts cost only this).
+# fast per-connect timeout for the phase-1 liveness sweep (dead hosts cost only this).
 DEFAULT_DISCOVERY_TIMEOUT = 0.5
 
 _COMMON_SERVICES = {
@@ -138,13 +131,13 @@ def _plan_chunks(
     if not isinstance(network, ipaddress.IPv4Network):
         raise ValueError(f"only IPv4 ranges are supported, got {cidr}")
     if network.prefixlen < chunk_prefix:
-        candidates: object = network.subnets(new_prefix=chunk_prefix)
+        candidates = network.subnets(new_prefix=chunk_prefix)
     else:
         candidates = iter((network,))
 
     chunks: list[ipaddress.IPv4Network] = []
     total = 0
-    for chunk in candidates:  # type: ignore[assignment]
+    for chunk in candidates:
         usable = max(_usable_count(chunk), 1)
         if total + usable > max_hosts:
             logger.warning(
@@ -184,7 +177,7 @@ async def scan_cidr(
     requested = set(port_list)
     disc_list = list(discovery_ports)
     disc_set = set(disc_list)
-    # Phase 2 sweeps the requested ports that phase 1 did not already probe. Discovery ports that
+    # phase 2 sweeps the requested ports that phase 1 did not already probe. Discovery ports that
     # are *not* requested are used only for liveness -- they are never reported as findings.
     sweep_ports = [p for p in port_list if p not in disc_set]
     disc_timeout = (
@@ -245,14 +238,14 @@ async def scan_cidr(
             )
             break
         hosts = _chunk_hosts(chunk)
-        # Phase 1: who is alive?
+        # phase 1: who is alive?
         disc_results = await asyncio.gather(*(_discover(ip) for ip in hosts))
         chunk_hits = [hit for _, _, open_hits in disc_results for hit in open_hits]
         live = [ip for ip, alive, _ in disc_results if alive]
-        # Phase 2: full port sweep on the live hosts only.
+        # phase 2: full port sweep on the live hosts only.
         if live:
-            for host_hits in await asyncio.gather(*(_sweep(ip) for ip in live)):
-                chunk_hits.extend(host_hits)
+            swept = await asyncio.gather(*(_sweep(ip) for ip in live))
+            chunk_hits.extend(hit for host_hits in swept for hit in host_hits)
         if chunk_hits:
             discovered.extend(chunk_hits)
             if on_hosts is not None:

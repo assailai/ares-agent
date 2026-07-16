@@ -266,7 +266,7 @@ async def test_run_task_reports_progress_and_streams_hosts(monkeypatch: pytest.M
 
 
 async def test_run_task_survives_a_failed_progress_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A dropped progress post is best-effort: it must never fail the scan or block completion.
+    # a dropped progress post is best-effort: it must never fail the scan or block completion.
     completed: list[list[dict]] = []
 
     async def _ok(*_a, **_k):
@@ -312,7 +312,7 @@ async def test_run_task_fails_without_a_target_network(monkeypatch: pytest.Monke
 async def test_run_advertises_auto_scoped_networks(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    # With ARES_NETWORKS unset, run() advertises whatever netdetect.scan_targets resolves for the
+    # with ARES_NETWORKS unset, run() advertises whatever netdetect.scan_targets resolves for the
     # configured scope -- the operator never has to type a CIDR.
     captured: dict[str, list[str]] = {}
 

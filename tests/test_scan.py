@@ -77,7 +77,7 @@ async def test_dead_hosts_are_not_port_swept(monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.asyncio
 async def test_refused_port_counts_as_alive(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A refused (RST) discovery port means the host is up even though nothing is listening there,
+    # a refused (RST) discovery port means the host is up even though nothing is listening there,
     # so the host is still port-swept.
     probed: list[tuple[str, int]] = []
     topology = {("10.0.0.1", 22): "closed"}  # refused, not open
@@ -174,7 +174,7 @@ async def test_streamed_hosts_union_to_final_result(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_budget_stops_scanning_early(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A zero-second budget means the very first chunk boundary check trips: no chunk runs.
+    # a zero-second budget means the very first chunk boundary check trips: no chunk runs.
     probed: list[tuple[str, int]] = []
     monkeypatch.setattr(scan, "_connect", _fake_connect({("10.0.0.5", 80): "open"}, probed=probed))
 

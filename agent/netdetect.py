@@ -20,7 +20,7 @@ import subprocess
 
 logger = logging.getLogger("ares.agent.netdetect")
 
-# The private space, used by the (opt-in) ``rfc1918`` scope.
+# the private space, used by the (opt-in) ``rfc1918`` scope.
 _RFC1918 = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 VALID_SCOPES = ("attached", "supernet16", "rfc1918")
 DEFAULT_SCOPE = "supernet16"
