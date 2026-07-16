@@ -18,6 +18,7 @@ import ipaddress
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 
 logger = logging.getLogger("ares.agent.scan")
 
@@ -152,6 +153,79 @@ def _plan_chunks(
     return chunks, total
 
 
+@dataclass(slots=True)
+class _Scan:
+    """mutable state + phase logic for one scan_cidr run, kept off scan_cidr so the driver stays
+    flat rather than a stack of stateful closures. progress is counted per host: a dead host is
+    done after phase 1, a live host after its phase-2 sweep."""
+
+    requested: set[int]
+    discovery_ports: list[int]
+    sweep_ports: list[int]
+    timeout: float
+    discovery_timeout: float
+    total_hosts: int
+    on_progress: ProgressCallback | None
+    on_hosts: HostsCallback | None
+    semaphore: asyncio.Semaphore
+    done: int = 0
+    last_pct: int = -1
+
+    async def _bounded(self, ip: str, port: int, timeout: float) -> str:
+        async with self.semaphore:
+            return await _connect(ip, port, timeout)
+
+    async def _advance(self) -> None:
+        pct = min(100, int(self.done * 100 / self.total_hosts))
+        if pct > self.last_pct:
+            self.last_pct = pct
+            if self.on_progress is not None:
+                await self.on_progress(pct)
+
+    async def _discover(self, ip: str) -> tuple[str, bool, list[dict]]:
+        states = await asyncio.gather(
+            *(self._bounded(ip, p, self.discovery_timeout) for p in self.discovery_ports)
+        )
+        alive = any(state in ("open", "closed") for state in states)
+        # discovery ports drive liveness always, but count as a finding only when requested.
+        open_hits = [
+            _hit(ip, p)
+            for p, state in zip(self.discovery_ports, states)
+            if state == "open" and p in self.requested
+        ]
+        if not alive:
+            self.done += 1
+            await self._advance()
+        return ip, alive, open_hits
+
+    async def _sweep(self, ip: str) -> list[dict]:
+        hits: list[dict] = []
+        if self.sweep_ports:
+            states = await asyncio.gather(
+                *(self._bounded(ip, p, self.timeout) for p in self.sweep_ports)
+            )
+            hits = [_hit(ip, p) for p, state in zip(self.sweep_ports, states) if state == "open"]
+        self.done += 1
+        await self._advance()
+        return hits
+
+    async def run_chunk(self, hosts: list[str]) -> list[dict]:
+        results = await asyncio.gather(*(self._discover(ip) for ip in hosts))
+        hits = [hit for _, _, open_hits in results for hit in open_hits]
+        live = [ip for ip, alive, _ in results if alive]
+        if live:
+            swept = await asyncio.gather(*(self._sweep(ip) for ip in live))
+            hits.extend(hit for host_hits in swept for hit in host_hits)
+        if hits and self.on_hosts is not None:
+            await self.on_hosts(sorted(hits, key=lambda d: (d["ip"], d["port"])))
+        return hits
+
+    async def finish(self) -> None:
+        # a fully-consumed (or budget-truncated) scan always ends at 100.
+        if self.on_progress is not None and self.last_pct < 100:
+            await self.on_progress(100)
+
+
 async def scan_cidr(
     cidr: str,
     ports: Sequence[int] | None = None,
@@ -174,59 +248,27 @@ async def scan_cidr(
     and whatever was found so far is returned (partial, logged).
     """
     port_list = list(ports) if ports else list(DEFAULT_PORTS)
-    requested = set(port_list)
     disc_list = list(discovery_ports)
     disc_set = set(disc_list)
-    # phase 2 sweeps the requested ports that phase 1 did not already probe. Discovery ports that
-    # are *not* requested are used only for liveness -- they are never reported as findings.
-    sweep_ports = [p for p in port_list if p not in disc_set]
-    disc_timeout = (
-        discovery_timeout if discovery_timeout is not None else min(timeout, DEFAULT_DISCOVERY_TIMEOUT)
-    )
-    semaphore = asyncio.Semaphore(max(1, concurrency))
-    started = time.monotonic()
-
     chunks, total_hosts = _plan_chunks(cidr, chunk_prefix=chunk_prefix, max_hosts=max_hosts)
-    total_hosts = max(total_hosts, 1)
+    scan = _Scan(
+        requested=set(port_list),
+        discovery_ports=disc_list,
+        # phase 2 sweeps the requested ports phase 1 did not already probe (discovery ports that
+        # are not requested drive liveness only and are never reported).
+        sweep_ports=[p for p in port_list if p not in disc_set],
+        timeout=timeout,
+        discovery_timeout=(
+            discovery_timeout if discovery_timeout is not None else min(timeout, DEFAULT_DISCOVERY_TIMEOUT)
+        ),
+        total_hosts=max(total_hosts, 1),
+        on_progress=on_progress,
+        on_hosts=on_hosts,
+        semaphore=asyncio.Semaphore(max(1, concurrency)),
+    )
 
     discovered: list[dict] = []
-    done = 0
-    last_pct = -1
-
-    async def _bounded(ip: str, port: int, to: float) -> str:
-        async with semaphore:
-            return await _connect(ip, port, to)
-
-    async def _emit_progress() -> None:
-        nonlocal last_pct
-        pct = min(100, int(done * 100 / total_hosts))
-        if pct > last_pct:
-            last_pct = pct
-            if on_progress is not None:
-                await on_progress(pct)
-
-    async def _discover(ip: str) -> tuple[str, bool, list[dict]]:
-        nonlocal done
-        states = await asyncio.gather(*(_bounded(ip, p, disc_timeout) for p in disc_list))
-        alive = any(state in ("open", "closed") for state in states)
-        open_hits = [
-            _hit(ip, p) for p, state in zip(disc_list, states) if state == "open" and p in requested
-        ]
-        if not alive:
-            done += 1  # a dead host is fully accounted for after phase 1
-            await _emit_progress()
-        return ip, alive, open_hits
-
-    async def _sweep(ip: str) -> list[dict]:
-        nonlocal done
-        hits: list[dict] = []
-        if sweep_ports:
-            states = await asyncio.gather(*(_bounded(ip, p, timeout) for p in sweep_ports))
-            hits = [_hit(ip, p) for p, state in zip(sweep_ports, states) if state == "open"]
-        done += 1  # a live host is fully accounted for after phase 2
-        await _emit_progress()
-        return hits
-
+    started = time.monotonic()
     for index, chunk in enumerate(chunks):
         if budget_seconds is not None and time.monotonic() - started > budget_seconds:
             logger.warning(
@@ -237,21 +279,8 @@ async def scan_cidr(
                 cidr,
             )
             break
-        hosts = _chunk_hosts(chunk)
-        # phase 1: who is alive?
-        disc_results = await asyncio.gather(*(_discover(ip) for ip in hosts))
-        chunk_hits = [hit for _, _, open_hits in disc_results for hit in open_hits]
-        live = [ip for ip, alive, _ in disc_results if alive]
-        # phase 2: full port sweep on the live hosts only.
-        if live:
-            swept = await asyncio.gather(*(_sweep(ip) for ip in live))
-            chunk_hits.extend(hit for host_hits in swept for hit in host_hits)
-        if chunk_hits:
-            discovered.extend(chunk_hits)
-            if on_hosts is not None:
-                await on_hosts(sorted(chunk_hits, key=lambda d: (d["ip"], d["port"])))
+        discovered.extend(await scan.run_chunk(_chunk_hosts(chunk)))
 
-    if on_progress is not None and last_pct < 100:
-        await on_progress(100)  # a fully-consumed (or budget-truncated) scan always ends at 100
+    await scan.finish()
     discovered.sort(key=lambda d: (d["ip"], d["port"]))
     return discovered
