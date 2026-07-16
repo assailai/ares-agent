@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     insecure: bool = False
 
     # how broadly to scan when ARES_NETWORKS is unset: "supernet16" (default; each attached
-    # subnet widened to its enclosing /16), "attached" (interface prefixes only), or "rfc1918"
-    # (all private space -- opt-in, slow). See agent.netdetect.VALID_SCOPES.
+    # subnet widened to its enclosing /16), "attached" (interface prefixes only), "rfc1918" (all
+    # private space -- opt-in, slow), or "host-all" (supernet16 plus the docker bridge subnets and
+    # the host loopback -- for a container run with host networking). See agent.netdetect.
     scan_scope: str = "supernet16"
     # max simultaneous TCP connects. Clamped at startup to what the file-descriptor budget allows.
     scan_concurrency: int = 2048

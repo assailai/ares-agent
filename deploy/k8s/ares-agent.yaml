@@ -78,6 +78,11 @@ spec:
         app: ares-agent
     spec:
       serviceAccountName: ares-updater
+      # A pod on the CNI network only sees the pod namespace. To scan the node's localhost + the
+      # LAN + the docker/CNI networks, put the pod on the host network and set
+      # ARES_SCAN_SCOPE=host-all (uncomment both):
+      #   hostNetwork: true
+      #   dnsPolicy: ClusterFirstWithHostNet
       # the agent runs as the non-root "ares" user (uid/gid 10001), but a PVC mounts root-owned,
       # so without this the agent cannot write /data (state + update-target) and crash-loops.
       securityContext:
