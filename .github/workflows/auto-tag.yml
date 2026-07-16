@@ -1,0 +1,82 @@
+# Turn a version bump into a release automatically.
+#
+# When a merge to main changes agent/__version__.py, this workflow creates the matching
+# `v<version>` git tag and a GitHub release, then builds the semver-pinned images
+# (<version>, <major>.<minor>, <major>).
+#
+# Why it builds the images itself: the tag is created with the default GITHUB_TOKEN, and
+# GitHub deliberately does NOT let a GITHUB_TOKEN push re-trigger another workflow. So a
+# `push: tags: v*` build would never fire from here. Rather than require a PAT, we call the
+# shared reusable workflow directly. Ordinary (non-version) pushes to main don't run this,
+# so semver image tags stay immutable.
+name: Auto Tag Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'agent/__version__.py'
+  workflow_dispatch:   # allow re-running for a version whose file already landed
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the tag and the GitHub release
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      created: ${{ steps.release.outputs.created }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + existing tags for existence check / release notes
+
+      - name: Read agent version
+        id: ver
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' agent/__version__.py)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not parse __version__ from agent/__version__.py"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag and release if new
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists; nothing to do."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Ares Docker Agent ${VERSION}"
+          git push origin "${TAG}"
+          gh release create "${TAG}" \
+            --title "Ares Docker Agent ${VERSION}" \
+            --generate-notes
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: tag
+    if: needs.tag.outputs.created == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      meta_tags: |
+        type=semver,pattern={{version}},value=${{ needs.tag.outputs.tag }}
+        type=semver,pattern={{major}}.{{minor}},value=${{ needs.tag.outputs.tag }}
+        type=semver,pattern={{major}},value=${{ needs.tag.outputs.tag }}
+      push: true
+    secrets: inherit
