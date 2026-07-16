@@ -11,7 +11,7 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
 #
 # Optional env (passed through to the container when set): ARES_URL,
-# ARES_NETWORKS, ARES_AGENT_NAME, ARES_INSECURE.
+# ARES_NETWORKS, ARES_AGENT_NAME, ARES_INSECURE, ARES_SCAN_SCOPE.
 # =============================================================================
 
 set -euo pipefail
@@ -83,8 +83,29 @@ start_container() {
     replace_existing_container
 
     local run_args=(-d --name "$CONTAINER_NAME" -e "ARES_TOKEN=$TOKEN")
+
+    # A container on the default bridge only sees its own namespace, so auto-detection finds the
+    # docker bridge instead of the LAN. On native Linux (Docker Engine) we run on the host network
+    # so the agent sees the real interfaces and auto-scopes the LAN. Docker Desktop (macOS/Windows/
+    # WSL) runs Linux containers in a VM: host networking would bind to that VM, not your machine,
+    # so it cannot reach the host's localhost/LAN -- there the operator scans by explicit CIDR.
+    case "$PLATFORM" in
+        linux)
+            run_args+=(--network host)
+            info "Using host networking so the agent auto-detects and scans the LAN."
+            ;;
+        *)
+            if [ -z "${ARES_NETWORKS:-}" ]; then
+                warn "On ${PLATFORM}, Docker runs Linux containers in a VM, so the agent cannot"
+                warn "auto-detect or reach this machine's localhost/LAN. Scan a network by passing"
+                warn "its CIDR, e.g. ARES_NETWORKS=192.168.1.0/24, or deploy on a Linux host on the"
+                warn "target network. The agent will still enroll and come online."
+            fi
+            ;;
+    esac
+
     local var
-    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE; do
+    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE ARES_SCAN_SCOPE; do
         [ -n "${!var:-}" ] && run_args+=(-e "$var=${!var}")
     done
     run_args+=(-v "${VOLUME_NAME}:/data" --restart unless-stopped)
