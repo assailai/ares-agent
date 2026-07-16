@@ -11,13 +11,13 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
 #
 # Optional env (passed through to the container when set): ARES_URL,
-# ARES_NETWORKS, ARES_AGENT_NAME, ARES_INSECURE.
+# ARES_NETWORKS, ARES_AGENT_NAME, ARES_INSECURE, ARES_SCAN_SCOPE.
 # =============================================================================
 
 set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
-IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.0.0}}"
+IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.1.0}}"
 CONTAINER_NAME="ares-agent"
 VOLUME_NAME="ares-agent-data"
 ONLINE_TIMEOUT=120
@@ -83,8 +83,17 @@ start_container() {
     replace_existing_container
 
     local run_args=(-d --name "$CONTAINER_NAME" -e "ARES_TOKEN=$TOKEN")
+
+    # On native Linux (Docker Engine) run on the host network so the agent sees the real interfaces
+    # and auto-scopes the LAN with no extra config. Docker Desktop (macOS/Windows/WSL) runs Linux
+    # containers in a VM where host networking would bind to that VM, not the machine, so we stay on
+    # bridge there: the agent still enrolls and comes online (the LAN is scanned from a Linux host).
+    if [ "$PLATFORM" = "linux" ]; then
+        run_args+=(--network host)
+    fi
+
     local var
-    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE; do
+    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE ARES_SCAN_SCOPE; do
         [ -n "${!var:-}" ] && run_args+=(-e "$var=${!var}")
     done
     run_args+=(-v "${VOLUME_NAME}:/data" --restart unless-stopped)

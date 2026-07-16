@@ -31,6 +31,23 @@ class Settings(BaseSettings):
     # Skip TLS verification. LOCAL DEV ONLY (e.g. plain http or a self-signed ares-v2).
     insecure: bool = False
 
+    # how broadly to scan when ARES_NETWORKS is unset: "supernet16" (default; each attached
+    # subnet widened to its enclosing /16), "attached" (interface prefixes only), "rfc1918" (all
+    # private ranges, each capped at scan_max_hosts and logged, so the largest are partial --
+    # opt-in, slow), or "host-all" (supernet16 plus the docker bridge subnets and the host
+    # loopback -- for a container run with host networking). See agent.netdetect.
+    scan_scope: str = "supernet16"
+    # max simultaneous TCP connects. Clamped at startup to what the file-descriptor budget allows.
+    scan_concurrency: int = 2048
+    # per-connect timeout (seconds) for the phase-2 full port sweep on a live host.
+    scan_connect_timeout: float = 1.0
+    # faster per-connect timeout (seconds) for the phase-1 liveness sweep across every host.
+    scan_discovery_timeout: float = 0.5
+    # hosts are scanned this prefix at a time (a /24 by default) for bounded memory + live progress.
+    scan_chunk_prefix: int = 24
+    # safety ceiling on hosts scanned per task; truncation beyond this is logged, never silent.
+    scan_max_hosts: int = 262_144
+
     log_level: str = "INFO"
     data_dir: Path = Field(default=Path("/data"))
     # single source of truth lives in agent/__version__.py

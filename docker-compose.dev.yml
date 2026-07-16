@@ -16,6 +16,11 @@ services:
     volumes:
       - ares-agent-data:/data
     restart: unless-stopped
+    # Headroom for the concurrent-connect scanner (still non-root, no added capabilities).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token}
       - ARES_URL=${ARES_URL:-https://api.assailai.com}

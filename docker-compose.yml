@@ -15,19 +15,32 @@
 
 services:
   ares-agent:
-    image: assailai/ares-agent:3.0.0  # pin to a version (see Settings -> Agents); avoid :latest
+    image: assailai/ares-agent:3.1.0  # pin to a version (see Settings -> Agents); avoid :latest
     container_name: ares-agent
     hostname: ares-agent
     volumes:
       - ares-agent-data:/data
+    # Headroom for the concurrent-connect scanner (still non-root, no added capabilities).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # A bridge-networked container only sees its own namespace, so it cannot reach the host's
+    # localhost services and auto-detection sees the container bridge, not the LAN. To scan the
+    # host localhost + the LAN + the docker networks, run on the host network (Linux only) and set
+    # ARES_SCAN_SCOPE=host-all below. Uncomment (and drop `hostname:` above, which host mode rejects):
+    #   network_mode: host
+    # On Docker Desktop (Mac/Windows) host mode does not expose the host's localhost; set
+    # ARES_NETWORKS explicitly there instead.
     environment:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token from the dashboard}
       # - ARES_URL=https://api.assailai.com        # override when self-hosting
-      # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override LAN auto-detection
+      # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override auto-detection with explicit CIDRs
+      # - ARES_SCAN_SCOPE=host-all                 # supernet16 (default) | attached | rfc1918 | host-all
     restart: unless-stopped
 
   ares-updater:
-    image: assailai/ares-updater:3.0.0
+    image: assailai/ares-updater:3.1.0
     container_name: ares-updater
     volumes:
       - ares-agent-data:/data:ro                  # reads the agent's update-target.json

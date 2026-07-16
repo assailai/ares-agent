@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import resource
 import sys
 import time
 from urllib.parse import urlparse
@@ -35,8 +36,15 @@ class _AuthInvalidated(Exception):
     re-enroll with ARES_TOKEN, rather than 401-looping forever on dead credentials.
     """
 
-# per-connect probe timeout for the TCP-connect scan.
-_PROBE_TIMEOUT = 2.0
+# scan concurrency resolved at startup against the file-descriptor budget (see
+# _resolve_scan_limits); per-connect timeouts + range breadth come from settings.
+_scan_limits = {"concurrency": 512}
+# file-descriptor target so high scan concurrency has enough sockets (headroom left for the
+# control-plane client and the data-plane tunnel).
+_FD_TARGET = 65536
+_FD_RESERVE = 256
+# floor so a tiny fd budget still leaves the scanner usable.
+_MIN_CONCURRENCY = 64
 _REGISTER_RETRY_SECONDS = 10
 # Consecutive 401s on the heartbeat before we attempt to re-enroll. A single 401 can be a
 # momentary blip (a load balancer mid-rollover); a streak means the stored agent token was
@@ -62,6 +70,25 @@ def _configure_logging() -> None:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+
+def _resolve_scan_limits() -> None:
+    """Raise the file-descriptor soft limit so high scan concurrency has enough sockets, then clamp
+    the effective concurrency to what that budget allows (reserving headroom for the control-plane
+    client and the tunnel). Degrades gracefully: if the limit cannot be raised, concurrency simply
+    tracks whatever the current budget is."""
+    soft = 1024
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = _FD_TARGET if hard == resource.RLIM_INFINITY else min(_FD_TARGET, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+    except (OSError, ValueError) as exc:
+        logger.debug("could not raise file-descriptor limit: %s", exc)
+    concurrency = max(_MIN_CONCURRENCY, min(settings.scan_concurrency, soft - _FD_RESERVE))
+    _scan_limits["concurrency"] = concurrency
+    logger.info("Scan concurrency=%d (file-descriptor soft limit=%d)", concurrency, soft)
 
 
 def _insecure_allowed(base_url: str) -> bool:
@@ -172,13 +199,46 @@ async def _run_task(token: str, task: dict) -> None:
     cidr = task.get("target_network")
     config = task.get("tool_config") or {}
     ports = config.get("ports") or list(scan.DEFAULT_PORTS)
+    budget = config.get("timeout_seconds")
     if not cidr:
         await control_plane.task_failed(settings, token, task_id, "missing target_network")
         return
     await control_plane.task_started(settings, token, task_id)
+
+    last_pct = 0
+
+    async def _report(percent: int, hosts: list[dict] | None = None) -> None:
+        # best-effort: progress + streamed hosts are a live-UX nicety, never allowed to fail the
+        # scan. task_completed sends the authoritative full list, and the server de-dups it.
+        try:
+            await control_plane.task_progress(
+                settings, token, task_id, percent=percent, discovered_hosts=hosts
+            )
+        except Exception as exc:  # noqa: BLE001 - a dropped progress post is not fatal
+            logger.debug("progress report for task %s failed: %s", task_id, exc)
+
+    async def _on_progress(percent: int) -> None:
+        nonlocal last_pct
+        last_pct = percent
+        await _report(percent)
+
+    async def _on_hosts(chunk: list[dict]) -> None:
+        await _report(last_pct, chunk)
+
     try:
-        logger.info("Scanning %s on ports %s", cidr, ports)
-        hosts = await scan.scan_cidr(cidr, ports, timeout=_PROBE_TIMEOUT)
+        logger.info("Scanning %s across %d port(s)", cidr, len(ports))
+        hosts = await scan.scan_cidr(
+            cidr,
+            ports,
+            timeout=settings.scan_connect_timeout,
+            discovery_timeout=settings.scan_discovery_timeout,
+            concurrency=_scan_limits["concurrency"],
+            max_hosts=settings.scan_max_hosts,
+            chunk_prefix=settings.scan_chunk_prefix,
+            budget_seconds=budget,
+            on_progress=_on_progress,
+            on_hosts=_on_hosts,
+        )
         await control_plane.task_completed(settings, token, task_id, hosts)
         logger.info("Reported %d discovered host(s) for %s", len(hosts), cidr)
     except asyncio.CancelledError:
@@ -294,12 +354,15 @@ async def run() -> int:
         return 1
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    networks = settings.network_overrides() or netdetect.detect_networks()
+    _resolve_scan_limits()
+    networks = settings.network_overrides() or netdetect.scan_targets(settings.scan_scope)
     if not networks:
         logger.warning(
             "No internal LAN auto-detected and ARES_NETWORKS is unset; registering with no "
             "networks. Set ARES_NETWORKS=10.0.0.0/24,... or edit them in the dashboard."
         )
+    else:
+        logger.info("Scanning networks (scope=%s): %s", settings.scan_scope, ", ".join(networks))
 
     state = await _enroll(networks)
     if state is None:

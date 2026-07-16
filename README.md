@@ -37,14 +37,20 @@ host privileges to grant.
 
 ## Getting started
 
-You need a **registration token** first. In the Ares dashboard go to **Settings -> Agents**,
-generate a token (it starts with `ares_agt_`), and copy it. Tokens are one-time: each enrolls a
-single agent.
+**Get your install command from the Ares platform, not by hand.** In Ares, open
+**Settings -> Agents -> Deploy an agent**. It generates a ready-to-run command with your one-time
+registration token, the correct control-plane URL for your environment, and the agent name already
+filled in. Copy that command and run it on the host you want to deploy on; that is the whole setup.
+The token is single-use (one agent per token), and the dashboard pins the current release version
+for you.
+
+The options below just show the *shape* of what the dashboard hands you (each needs the
+`ARES_TOKEN` it issues), in case you want to adapt it for Compose, Kubernetes, or your own tooling.
 
 ### Option A: Docker run
 
-Pin to a specific version (the dashboard's deploy command shows the current release under
-Settings -> Agents); avoid `:latest` so deploys are reproducible.
+The dashboard's Deploy flow gives you exactly this command, filled in. Pin to a specific version
+(the deploy command shows the current release); avoid `:latest` so deploys are reproducible.
 
 ```bash
 docker run -d --name ares-agent \
