@@ -119,7 +119,7 @@ The agent is configured entirely through environment variables (all prefixed `AR
 | `ARES_TOKEN` | *(required)* | One-time registration token from the dashboard. The agent exits with a clear message if it is missing. |
 | `ARES_URL` | `https://api.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
 | `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection entirely. You can also edit the networks in the dashboard after enrollment. |
-| `ARES_SCAN_SCOPE` | `supernet16` | How broadly to scan when `ARES_NETWORKS` is unset. `supernet16` widens each auto-detected subnet to its enclosing /16 (scan the whole local network); `attached` keeps just the interface prefix; `rfc1918` scans all private space (opt-in, slow); `host-all` adds the docker bridge subnets and the host loopback (for a container on the host network, see below). |
+| `ARES_SCAN_SCOPE` | `supernet16` | How broadly to scan when `ARES_NETWORKS` is unset. `supernet16` widens each auto-detected subnet to its enclosing /16 (scan the whole local network); `attached` keeps just the interface prefix; `rfc1918` sweeps the private ranges (10/8, 172.16/12, 192.168/16), each capped at the per-task host limit (`ARES_SCAN_MAX_HOSTS`, ~a /14, and logged when hit) so a huge range like 10/8 is only partially covered — opt-in, slow; `host-all` adds the docker bridge subnets and the host loopback (for a container on the host network, see below). |
 | `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
 | `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
@@ -189,6 +189,15 @@ docker pull assailai/ares-agent:<new-version>
 ```
 
 Or with Compose: bump the pinned `image:` tag, then `docker compose pull && docker compose up -d`.
+
+### Heads-up for 3.1.0: wider default scan scope
+
+3.1.0 makes `supernet16` the default scope. When `ARES_NETWORKS` is unset, the agent now scans
+the enclosing **/16** of each auto-detected subnet, not just that subnet — so an agent that was
+scanning `192.168.1.0/24` will, after upgrading, scan `192.168.0.0/16` (~65k hosts), including
+addresses outside its own /24. This is intentional for internal asset discovery. To keep the
+pre-3.1.0 behaviour, pin `ARES_SCAN_SCOPE=attached` (or set `ARES_NETWORKS` explicitly). The
+agent logs the exact networks it will scan at startup.
 
 ### Auto-update (the companion updater)
 

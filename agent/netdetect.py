@@ -8,7 +8,8 @@ the filtering logic is unit-testable.
 ``scan_targets(scope)`` turns the detected attached subnets into the CIDRs the agent actually
 advertises and scans, so an operator never has to set ARES_NETWORKS: ``supernet16`` (the default)
 widens each attached subnet to its enclosing /16 to sweep the flat local network, ``attached``
-keeps the interface prefixes as-is, ``rfc1918`` scans all private space (opt-in, slow), and
+keeps the interface prefixes as-is, ``rfc1918`` targets all private ranges (each capped at the
+per-task host limit and logged, so the largest are only partial), opt-in and slow, and
 ``host-all`` also folds in the docker bridge subnets and the host loopback so a host-networked
 container sweeps the container networks and localhost-bound services too.
 """
