@@ -78,29 +78,39 @@ spec:
         app: ares-agent
     spec:
       serviceAccountName: ares-updater
+      # A pod on the CNI network only sees the pod namespace. To scan the node's localhost + the
+      # LAN + the docker/CNI networks, put the pod on the host network and set
+      # ARES_SCAN_SCOPE=host-all (uncomment both):
+      #   hostNetwork: true
+      #   dnsPolicy: ClusterFirstWithHostNet
       # the agent runs as the non-root "ares" user (uid/gid 10001), but a PVC mounts root-owned,
       # so without this the agent cannot write /data (state + update-target) and crash-loops.
       securityContext:
         fsGroup: 10001
       containers:
         - name: ares-agent          # the patched container; ARES_UPDATE_CONTAINER matches this
-          image: assailai/ares-agent:3.0.0   # pinned; the updater rolls this forward
+          image: assailai/ares-agent:3.1.0   # pinned; the updater rolls this forward
           envFrom:
             - secretRef:
                 name: ares-agent
+          # The concurrent-connect scanner wants many file descriptors. Kubernetes has no
+          # per-container nofile knob, so the agent raises its own RLIMIT_NOFILE soft limit at
+          # startup toward the runtime's hard limit (containerd defaults are high); no capability
+          # or privilege is required. To scan very large ranges (e.g. ARES_SCAN_SCOPE=rfc1918),
+          # raise the runtime's default nofile hard limit on the node.
           volumeMounts:
             - name: data
               mountPath: /data
           resources:
             requests: { memory: "128Mi", cpu: "50m" }
-            limits: { memory: "256Mi", cpu: "250m" }
+            limits: { memory: "512Mi", cpu: "500m" }
           livenessProbe:
             exec:
               command: ["test", "-f", "/data/agent-state.json"]
             initialDelaySeconds: 60
             periodSeconds: 30
         - name: ares-updater         # companion; keeps ares-agent on the marked version
-          image: assailai/ares-updater:3.0.0
+          image: assailai/ares-updater:3.1.0
           env:
             - name: ARES_UPDATE_CONTAINER
               value: "ares-agent"
