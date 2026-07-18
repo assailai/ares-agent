@@ -53,9 +53,20 @@ def test_read_target(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_verify_gate() -> None:
     # dev override returns the ref unpinned (with a warning); fail-closed (None) when on but
-    # unconfigured (no cosign key or identity).
+    # unconfigured (identity + issuer cleared, no key), even though the image now ships a default
+    # signer identity.
     assert verify.verify("img:1", UpdaterSettings(require_signature=False)) == "img:1"
-    assert verify.verify("img:1", UpdaterSettings(require_signature=True)) is None
+    unconfigured = UpdaterSettings(require_signature=True, cosign_identity="", cosign_issuer="")
+    assert verify.verify("img:1", unconfigured) is None
+
+
+def test_default_settings_ship_a_signer_identity() -> None:
+    # a stock updater (no env) verifies signatures out of the box: identity + issuer are baked in,
+    # so the docker-run / compose / k8s install commands do not each spell the regexp out.
+    settings = UpdaterSettings()
+    assert settings.require_signature is True
+    assert "assailai/docker-agent-ares" in settings.cosign_identity
+    assert settings.cosign_issuer == "https://token.actions.githubusercontent.com"
 
 
 def test_verify_pins_the_cosign_verified_digest(monkeypatch: pytest.MonkeyPatch) -> None:

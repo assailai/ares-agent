@@ -46,11 +46,12 @@ services:
       - ares-agent-data:/data:ro                  # reads the agent's update-target.json
       - /var/run/docker.sock:/var/run/docker.sock  # recreates the agent on a new version
     environment:
-      # Fail-closed: verify the image's cosign signature before applying. CI signs published
-      # images keyless (OIDC); set false only for local/dev with unsigned images.
+      # Fail-closed: verify the image's cosign signature before applying (CI signs published images
+      # keyless via OIDC). The expected signer identity + issuer are baked into the updater image;
+      # override ARES_UPDATE_COSIGN_IDENTITY / ARES_UPDATE_COSIGN_ISSUER only when self-hosting the
+      # images under a different signer, or set ARES_UPDATE_REQUIRE_SIGNATURE=false for local/dev
+      # with unsigned images.
       - ARES_UPDATE_REQUIRE_SIGNATURE=true
-      - ARES_UPDATE_COSIGN_IDENTITY=^https://github\.com/assailai/docker-agent-ares/\.github/workflows/docker-publish\.yml@refs/tags/v.*$
-      - ARES_UPDATE_COSIGN_ISSUER=https://token.actions.githubusercontent.com
     restart: unless-stopped
 
 volumes:
