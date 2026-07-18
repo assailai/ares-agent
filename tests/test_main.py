@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from unittest.mock import Mock
 
 import httpx
@@ -331,3 +332,85 @@ async def test_run_advertises_auto_scoped_networks(
         await main.run()
 
     assert captured["networks"] == ["10.9.0.0/16"]
+
+
+# --- network-resilience watchdog + bounded metrics ----------------------------------------------
+
+
+@pytest.fixture
+def _restore_liveness():
+    """Snapshot/restore the module-level liveness clock so a test that backdates it does not
+    bleed into the next."""
+    saved = dict(main._liveness)
+    yield
+    main._liveness.clear()
+    main._liveness.update(saved)
+
+
+async def test_record_contact_bumps_liveness_and_writes_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, _restore_liveness
+) -> None:
+    # a successful contact advances the watchdog clock and refreshes the healthcheck marker file.
+    monkeypatch.setattr(main.settings, "data_dir", tmp_path)
+    main._liveness["last_contact"] = 0.0
+
+    main._record_contact()
+
+    assert main._liveness["last_contact"] > 0.0
+    marker = tmp_path / "last-contact"
+    assert marker.exists()
+    assert abs(time.time() - float(marker.read_text())) < 5  # a fresh epoch second was written
+
+
+async def test_watchdog_exits_when_contact_is_stale(
+    monkeypatch: pytest.MonkeyPatch, _restore_liveness
+) -> None:
+    # no successful contact for longer than max_offline_seconds -> exit so the container restarts.
+    class _Exited(Exception):
+        pass
+
+    codes: list[int] = []
+
+    def _fake_exit(code: int) -> None:
+        codes.append(code)
+        raise _Exited  # stand in for os._exit so the test can observe it instead of dying
+
+    monkeypatch.setattr(main.os, "_exit", _fake_exit)
+    monkeypatch.setattr(main, "_WATCHDOG_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(main.settings, "max_offline_seconds", 1)
+    main._liveness["last_contact"] = time.monotonic() - 10  # last contact well past the limit
+
+    with pytest.raises(_Exited):
+        await asyncio.wait_for(main._watchdog_loop(), timeout=2)
+    assert codes == [1]  # non-zero: an unhealthy restart
+
+
+async def test_watchdog_stays_quiet_while_contact_is_fresh(
+    monkeypatch: pytest.MonkeyPatch, _restore_liveness
+) -> None:
+    # while contact is recent the watchdog leaves the process alone.
+    exited: list[int] = []
+    monkeypatch.setattr(main.os, "_exit", lambda code: exited.append(code))
+    monkeypatch.setattr(main, "_WATCHDOG_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(main.settings, "max_offline_seconds", 600)
+    main._liveness["last_contact"] = time.monotonic()
+
+    with pytest.raises(asyncio.TimeoutError):  # it keeps watching (never exits) until cancelled
+        await asyncio.wait_for(main._watchdog_loop(), timeout=0.2)
+    assert exited == []
+
+
+async def test_sample_cpu_percent_returns_none_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # a failing CPU read is best-effort: the beat proceeds with no CPU rather than raising.
+    def _boom() -> float:
+        raise RuntimeError("cgroup unreadable")
+
+    monkeypatch.setattr(main, "read_cpu_percent", _boom)
+    assert await main._sample_cpu_percent() is None
+
+
+async def test_sample_cpu_percent_returns_none_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # a slow/starved sample must not wedge the beat: it is abandoned past the timeout.
+    monkeypatch.setattr(main, "_CPU_SAMPLE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(main, "read_cpu_percent", lambda: time.sleep(0.5) or 12.3)
+    assert await main._sample_cpu_percent() is None
