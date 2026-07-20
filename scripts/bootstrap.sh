@@ -2,8 +2,9 @@
 # =============================================================================
 # Ares Docker Agent - Bootstrap Script
 # =============================================================================
-# Zero-touch installer: checks Docker, starts the agent, waits until it reports
-# online. Cross-platform (macOS, Linux, Windows Git Bash / WSL).
+# Zero-touch installer: checks Docker, starts the agent and its auto-update companion, waits until
+# the agent reports online. Cross-platform (macOS, Linux, Windows Git Bash / WSL). Set
+# ARES_DISABLE_AUTOUPDATE to install the agent alone (no self-update).
 #
 # Usage:
 #   ARES_TOKEN=<token> bash scripts/bootstrap.sh
@@ -18,7 +19,12 @@ set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
 IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.1.0}}"
+# The companion updater keeps the agent on the release the dashboard marks current; it is the only
+# component that touches the Docker socket (the agent stays unprivileged). Set ARES_DISABLE_AUTOUPDATE
+# to opt out (change-control-sensitive hosts). Override the image with ARES_UPDATER_IMAGE=<full ref>.
+UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.1.0}}"
 CONTAINER_NAME="ares-agent"
+UPDATER_CONTAINER_NAME="ares-updater"
 VOLUME_NAME="ares-agent-data"
 ONLINE_TIMEOUT=120
 ONLINE_INTERVAL=3
@@ -72,15 +78,16 @@ resolve_token() {
     fi
 }
 
-replace_existing_container() {
-    docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || return 0
-    warn "A container named '${CONTAINER_NAME}' already exists; replacing it (the data volume is kept)."
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+replace_existing() {
+    local name="$1"
+    docker ps -a --format '{{.Names}}' | grep -q "^${name}$" || return 0
+    warn "A container named '${name}' already exists; replacing it (the data volume is kept)."
+    docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
 start_container() {
     step "Starting the agent"
-    replace_existing_container
+    replace_existing "$CONTAINER_NAME"
 
     local run_args=(-d --name "$CONTAINER_NAME" -e "ARES_TOKEN=$TOKEN")
 
@@ -103,6 +110,29 @@ start_container() {
         exit 1
     fi
     info "Container started."
+}
+
+start_updater() {
+    if [ -n "${ARES_DISABLE_AUTOUPDATE:-}" ]; then
+        info "Auto-update disabled (ARES_DISABLE_AUTOUPDATE set); the agent will not self-update."
+        return 0
+    fi
+    step "Starting the auto-update companion"
+    replace_existing "$UPDATER_CONTAINER_NAME"
+    # Only the updater touches the Docker socket; it recreates the agent on a new, cosign-verified
+    # image when the dashboard marks a release current (the signer identity is baked into the image).
+    # Non-fatal: if it cannot start (e.g. no socket access), the agent still runs, just without
+    # auto-update.
+    if docker run -d --name "$UPDATER_CONTAINER_NAME" \
+        -e "ARES_UPDATE_CONTAINER=$CONTAINER_NAME" \
+        -v "${VOLUME_NAME}:/data:ro" \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        --restart unless-stopped "$UPDATER_IMAGE" >/dev/null 2>&1; then
+        info "Auto-update companion started."
+    else
+        warn "Could not start the ares-updater companion; the agent will run but will not auto-update."
+        warn "Check Docker socket access, or pull it manually with: docker pull $UPDATER_IMAGE"
+    fi
 }
 
 wait_until_online() {
@@ -140,6 +170,9 @@ print_summary() {
     info "  docker logs -f ares-agent     follow the agent's logs"
     info "  docker restart ares-agent     restart the agent"
     info "  docker rm -f ares-agent       stop and remove it (the data volume is kept)"
+    if [ -z "${ARES_DISABLE_AUTOUPDATE:-}" ]; then
+        info "  docker logs -f ares-updater   follow the auto-update companion"
+    fi
 }
 
 main() {
@@ -148,6 +181,7 @@ main() {
     check_docker
     resolve_token "$@"
     start_container
+    start_updater
     wait_until_online
     print_summary
 }

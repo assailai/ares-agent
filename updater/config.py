@@ -32,8 +32,14 @@ class UpdaterSettings(BaseSettings):
     # against the signing workflow's OIDC identity. Only released versions verify: the ref is
     # refs/tags/v* (main / latest / sha images carry refs/heads/main and intentionally do not
     # verify, so the updater only rolls forward to released versions). Plus the OIDC issuer below.
-    cosign_identity: str = ""
-    cosign_issuer: str = ""
+    # Defaulted to this image's own publishing workflow so every deploy shape (docker run, compose,
+    # k8s) verifies out of the box without spelling the regexp out in each install command; override
+    # only when self-hosting the images under a different signer.
+    cosign_identity: str = (
+        r"^https://github\.com/assailai/docker-agent-ares/"
+        r"\.github/workflows/docker-publish\.yml@refs/tags/v.*$"
+    )
+    cosign_issuer: str = "https://token.actions.githubusercontent.com"
     # cosign key-based verification (alternative): path to a cosign public key.
     cosign_key: str = ""
 

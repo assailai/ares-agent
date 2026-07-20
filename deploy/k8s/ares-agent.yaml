@@ -104,24 +104,31 @@ spec:
           resources:
             requests: { memory: "128Mi", cpu: "50m" }
             limits: { memory: "512Mi", cpu: "500m" }
+          # Liveness reflects real contact with Ares: the agent refreshes its last-contact marker
+          # on every successful heartbeat/poll, so a network-isolated / wedged agent reads unhealthy
+          # and k8s restarts the pod (fresh process => re-resolved DNS + clean thread pool). The
+          # in-process watchdog exits on the same condition; this probe is the k8s belt-and-braces.
           livenessProbe:
             exec:
-              command: ["test", "-f", "/data/agent-state.json"]
-            initialDelaySeconds: 60
+              command: ["python", "-m", "agent.healthcheck"]
+            initialDelaySeconds: 90
             periodSeconds: 30
+            # the probe cold-starts a Python interpreter (+ pydantic import); the default 1s
+            # timeout can flap under the CPU limit / CFS throttling, so match the Docker
+            # HEALTHCHECK's 5s. Three misses (failureThreshold) before a restart.
+            timeoutSeconds: 5
+            failureThreshold: 3
         - name: ares-updater         # companion; keeps ares-agent on the marked version
           image: assailai/ares-updater:3.1.0
           env:
             - name: ARES_UPDATE_CONTAINER
               value: "ares-agent"
-            # Fail-closed: verify the image's cosign signature before applying. CI signs
-            # published images keyless (OIDC); set "false" only for local/dev with unsigned images.
+            # Fail-closed: verify the image's cosign signature before applying (CI signs published
+            # images keyless via OIDC). The expected signer identity + issuer are baked into the
+            # updater image; override ARES_UPDATE_COSIGN_IDENTITY / ARES_UPDATE_COSIGN_ISSUER only
+            # when self-hosting the images under a different signer.
             - name: ARES_UPDATE_REQUIRE_SIGNATURE
               value: "true"
-            - name: ARES_UPDATE_COSIGN_IDENTITY
-              value: "^https://github\\.com/assailai/docker-agent-ares/\\.github/workflows/docker-publish\\.yml@refs/tags/v.*$"
-            - name: ARES_UPDATE_COSIGN_ISSUER
-              value: "https://token.actions.githubusercontent.com"
           volumeMounts:
             - name: data
               mountPath: /data        # reads the agent's update-target.json

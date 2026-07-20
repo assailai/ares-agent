@@ -63,6 +63,18 @@ _INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 _cadence = {"heartbeat": 30, "poll": 5}
 # captured at import (process start) so heartbeats can report uptime since connect.
 _AGENT_START_MONOTONIC = time.monotonic()
+# monotonic times of the last successful control-plane contact (heartbeat or task poll) and the
+# last healthcheck-marker write. The watchdog compares last_contact to decide the agent has gone
+# dark; last_marker_at throttles the marker file so it does not churn /data on every poll.
+_liveness = {"last_contact": time.monotonic(), "last_marker_at": 0.0}
+# how often the watchdog checks liveness (well below max_offline_seconds, so the exit is timely).
+_WATCHDOG_INTERVAL_SECONDS = 30
+# rewrite the healthcheck marker at most this often: the watchdog uses the in-memory clock, so the
+# file only needs to stay fresh enough for the probe's max_offline_seconds grace window.
+_MARKER_MIN_INTERVAL_SECONDS = 30
+# bound on the threadpool-dispatched CPU sample: a pool starved by hung DNS lookups must never
+# wedge the heartbeat, so the sample is skipped past this timeout.
+_CPU_SAMPLE_TIMEOUT_SECONDS = 5
 
 
 def _configure_logging() -> None:
@@ -136,6 +148,68 @@ def _write_update_target(version: str) -> None:
         logger.debug("could not write update target (%s); is the shared volume mounted?", exc)
 
 
+def _record_contact() -> None:
+    """Mark a successful control-plane contact: bump the watchdog's liveness clock (every call) and
+    refresh the healthcheck marker file (throttled). The in-memory clock is what the watchdog reads;
+    the marker only backs the container HEALTHCHECK / k8s liveness probe, so it is rewritten at most
+    every _MARKER_MIN_INTERVAL_SECONDS to avoid churning /data on the ~5s poll cadence. Best-effort
+    on the file."""
+    now = time.monotonic()
+    _liveness["last_contact"] = now
+    if now - _liveness["last_marker_at"] < _MARKER_MIN_INTERVAL_SECONDS:
+        return
+    _liveness["last_marker_at"] = now
+    try:
+        marker = settings.data_dir / "last-contact"
+        tmp = marker.with_suffix(".tmp")
+        tmp.write_text(str(int(time.time())))
+        tmp.replace(marker)
+    except OSError as exc:
+        logger.debug("could not write liveness marker: %s", exc)
+
+
+async def _sample_cpu_percent() -> float | None:
+    """Read CPU% off the loop's default thread pool, bounded by a timeout. The metric is
+    best-effort: a slow or starved pool (e.g. leaked, non-cancellable getaddrinfo threads during a
+    DNS outage) must never wedge the heartbeat here, so on timeout/error we skip it and let the beat
+    proceed (reporting no CPU) rather than block forever."""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(read_cpu_percent), _CPU_SAMPLE_TIMEOUT_SECONDS
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - metric is best-effort; never block or fail the beat
+        logger.debug("cpu sample skipped: %s", exc)
+        return None
+
+
+async def _watchdog_loop() -> None:
+    """Exit the process when the agent has had no successful contact with Ares for
+    ``max_offline_seconds``, so the container runtime restarts it fresh (a new process re-resolves
+    DNS and rebuilds its client / thread pool). This is the recovery of last resort for a wedged or
+    network-isolated agent that the in-loop retries cannot rescue. It only sleeps and compares
+    monotonic time, never touching the network or the shared thread pool, so the same starvation
+    that can wedge the heartbeat/poll loops cannot wedge the watchdog too.
+
+    Scope (accepted gap): the watchdog runs only while serving (started in ``_serve``), so initial
+    ``_enroll`` and post-401 ``_reenroll`` are not covered. That is deliberate and low risk: those
+    loops make network calls through fresh, short-timeout clients that fail-and-retry rather than
+    hang, and the thread-pool starvation this guards against only arises in the long-lived serving
+    loops - so there is nothing here for a last-resort exit to rescue."""
+    while True:
+        await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
+        offline_for = time.monotonic() - _liveness["last_contact"]
+        if offline_for >= settings.max_offline_seconds:
+            logger.error(
+                "No successful contact with Ares for %.0fs (limit %ds); exiting so the container "
+                "restarts and reconnects.",
+                offline_for,
+                settings.max_offline_seconds,
+            )
+            os._exit(1)
+
+
 async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
     failures = 0
     unauthorized = 0
@@ -143,7 +217,8 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
     while True:
         try:
             # CPU sampling reads the cgroup counter twice on the first call; keep it off the loop.
-            cpu_percent = await asyncio.to_thread(read_cpu_percent)
+            # Bounded so a thread pool starved by hung DNS lookups can never wedge the beat here.
+            cpu_percent = await _sample_cpu_percent()
             resp = await control_plane.heartbeat(
                 settings,
                 state.agent_token or "",
@@ -163,6 +238,7 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
                 logger.info("Heartbeat recovered after %d failed attempt(s).", failures)
             failures = 0
             unauthorized = 0
+            _record_contact()  # feed the watchdog + refresh the healthcheck marker
             _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
             tunnel.sync(bool(resp.get("tunnel_required")))
             if resp.get("restart_requested"):
@@ -256,6 +332,7 @@ async def _poll_loop(state: AgentState) -> None:
             if failures:
                 logger.info("Task polling recovered after %d failed attempt(s).", failures)
                 failures = 0
+            _record_contact()  # a successful poll is also live contact with Ares
             for task in tasks:
                 await _run_task(state.agent_token or "", task)
         except asyncio.CancelledError:
@@ -316,10 +393,17 @@ async def _reenroll(networks: list[str]) -> AgentState | None:
 async def _serve(state: AgentState, tunnel: TunnelManager) -> None:
     """Run the heartbeat and task-poll loops until one exits. If either raises (e.g. the
     heartbeat raises _AuthInvalidated on a sustained 401), cancel its sibling and re-raise
-    so the caller decides whether to re-enroll or shut down."""
+    so the caller decides whether to re-enroll or shut down.
+
+    A watchdog task runs alongside the loops: if the agent has no successful contact with Ares for
+    ``max_offline_seconds`` it exits the process so the container restarts fresh. Reset the liveness
+    clock here so each serving session (including one entered after a re-enroll) starts with a full
+    grace window rather than inheriting a stale timestamp."""
+    _liveness["last_contact"] = time.monotonic()
     tasks = {
         asyncio.create_task(_heartbeat_loop(state, tunnel)),
         asyncio.create_task(_poll_loop(state)),
+        asyncio.create_task(_watchdog_loop()),
     }
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)

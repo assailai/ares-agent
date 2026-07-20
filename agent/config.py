@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # safety ceiling on hosts scanned per task; truncation beyond this is logged, never silent.
     scan_max_hosts: int = 262_144
 
+    # If the agent cannot successfully reach Ares (heartbeat or task poll) for this long, it exits
+    # so the container runtime restarts it fresh: a new process re-resolves DNS and rebuilds its
+    # client, recovering from a wedged / network-isolated state that in-loop retries cannot (e.g. a
+    # thread pool starved by hung DNS lookups). Generous, so a brief blip self-heals without a
+    # restart (10 min is roughly 20 missed 30s heartbeats).
+    max_offline_seconds: int = Field(default=600, ge=60, le=86400)
+
     log_level: str = "INFO"
     data_dir: Path = Field(default=Path("/data"))
     # single source of truth lives in agent/__version__.py

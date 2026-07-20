@@ -56,10 +56,13 @@ ENV PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     ARES_DATA_DIR=/data
 
-# The agent is outbound-only, so no port is published. Liveness: the state file
-# appears once the agent has registered.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD test -f /data/agent-state.json || exit 1
+# The agent is outbound-only, so no port is published. Liveness reflects real contact with Ares:
+# the agent refreshes its last-contact marker on every successful heartbeat/poll, so an agent that
+# has gone dark reads unhealthy rather than "up" forever (see agent/healthcheck.py). Under Docker
+# the in-process watchdog is what restarts a wedged agent (restart policy acts on exit, not on
+# "unhealthy"); this probe drives the k8s liveness restart and honest status.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD python -m agent.healthcheck
 
 VOLUME ["/data"]
 USER ares
