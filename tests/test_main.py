@@ -353,6 +353,7 @@ async def test_record_contact_bumps_liveness_and_writes_marker(
     # a successful contact advances the watchdog clock and refreshes the healthcheck marker file.
     monkeypatch.setattr(main.settings, "data_dir", tmp_path)
     main._liveness["last_contact"] = 0.0
+    main._liveness["last_marker_at"] = 0.0  # ensure the throttle allows this first write
 
     main._record_contact()
 
@@ -360,6 +361,25 @@ async def test_record_contact_bumps_liveness_and_writes_marker(
     marker = tmp_path / "last-contact"
     assert marker.exists()
     assert abs(time.time() - float(marker.read_text())) < 5  # a fresh epoch second was written
+
+
+async def test_record_contact_throttles_the_marker_but_always_bumps_the_clock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, _restore_liveness
+) -> None:
+    # the marker file is rewritten at most every _MARKER_MIN_INTERVAL_SECONDS (no /data churn on the
+    # ~5s poll), but the in-memory watchdog clock advances on every contact.
+    monkeypatch.setattr(main.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(main, "_MARKER_MIN_INTERVAL_SECONDS", 999)
+    main._liveness["last_marker_at"] = 0.0
+    main._record_contact()  # first write allowed (last_marker_at was 0)
+    marker = tmp_path / "last-contact"
+    marker.unlink()  # remove it; a throttled second call must NOT recreate it
+    main._liveness["last_contact"] = 0.0
+
+    main._record_contact()
+
+    assert not marker.exists()  # throttled: no rewrite within the interval
+    assert main._liveness["last_contact"] > 0.0  # but the watchdog clock still advanced
 
 
 async def test_watchdog_exits_when_contact_is_stale(

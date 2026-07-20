@@ -113,6 +113,11 @@ spec:
               command: ["python", "-m", "agent.healthcheck"]
             initialDelaySeconds: 90
             periodSeconds: 30
+            # the probe cold-starts a Python interpreter (+ pydantic import); the default 1s
+            # timeout can flap under the CPU limit / CFS throttling, so match the Docker
+            # HEALTHCHECK's 5s. Three misses (failureThreshold) before a restart.
+            timeoutSeconds: 5
+            failureThreshold: 3
         - name: ares-updater         # companion; keeps ares-agent on the marked version
           image: assailai/ares-updater:3.1.0
           env:

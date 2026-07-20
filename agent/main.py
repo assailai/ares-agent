@@ -63,11 +63,15 @@ _INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 _cadence = {"heartbeat": 30, "poll": 5}
 # captured at import (process start) so heartbeats can report uptime since connect.
 _AGENT_START_MONOTONIC = time.monotonic()
-# monotonic time of the last successful control-plane contact (heartbeat or task poll). The
-# watchdog compares against it to decide the agent has gone dark and must restart itself.
-_liveness = {"last_contact": time.monotonic()}
+# monotonic times of the last successful control-plane contact (heartbeat or task poll) and the
+# last healthcheck-marker write. The watchdog compares last_contact to decide the agent has gone
+# dark; last_marker_at throttles the marker file so it does not churn /data on every poll.
+_liveness = {"last_contact": time.monotonic(), "last_marker_at": 0.0}
 # how often the watchdog checks liveness (well below max_offline_seconds, so the exit is timely).
 _WATCHDOG_INTERVAL_SECONDS = 30
+# rewrite the healthcheck marker at most this often: the watchdog uses the in-memory clock, so the
+# file only needs to stay fresh enough for the probe's max_offline_seconds grace window.
+_MARKER_MIN_INTERVAL_SECONDS = 30
 # bound on the threadpool-dispatched CPU sample: a pool starved by hung DNS lookups must never
 # wedge the heartbeat, so the sample is skipped past this timeout.
 _CPU_SAMPLE_TIMEOUT_SECONDS = 5
@@ -145,10 +149,16 @@ def _write_update_target(version: str) -> None:
 
 
 def _record_contact() -> None:
-    """Mark a successful control-plane contact: bump the watchdog's liveness clock and refresh the
-    healthcheck marker file. Best-effort on the file (the in-memory clock is what the watchdog uses;
-    the marker only backs the container HEALTHCHECK / k8s liveness probe)."""
-    _liveness["last_contact"] = time.monotonic()
+    """Mark a successful control-plane contact: bump the watchdog's liveness clock (every call) and
+    refresh the healthcheck marker file (throttled). The in-memory clock is what the watchdog reads;
+    the marker only backs the container HEALTHCHECK / k8s liveness probe, so it is rewritten at most
+    every _MARKER_MIN_INTERVAL_SECONDS to avoid churning /data on the ~5s poll cadence. Best-effort
+    on the file."""
+    now = time.monotonic()
+    _liveness["last_contact"] = now
+    if now - _liveness["last_marker_at"] < _MARKER_MIN_INTERVAL_SECONDS:
+        return
+    _liveness["last_marker_at"] = now
     try:
         marker = settings.data_dir / "last-contact"
         tmp = marker.with_suffix(".tmp")
@@ -180,7 +190,13 @@ async def _watchdog_loop() -> None:
     DNS and rebuilds its client / thread pool). This is the recovery of last resort for a wedged or
     network-isolated agent that the in-loop retries cannot rescue. It only sleeps and compares
     monotonic time, never touching the network or the shared thread pool, so the same starvation
-    that can wedge the heartbeat/poll loops cannot wedge the watchdog too."""
+    that can wedge the heartbeat/poll loops cannot wedge the watchdog too.
+
+    Scope (accepted gap): the watchdog runs only while serving (started in ``_serve``), so initial
+    ``_enroll`` and post-401 ``_reenroll`` are not covered. That is deliberate and low risk: those
+    loops make network calls through fresh, short-timeout clients that fail-and-retry rather than
+    hang, and the thread-pool starvation this guards against only arises in the long-lived serving
+    loops - so there is nothing here for a last-resort exit to rescue."""
     while True:
         await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
         offline_for = time.monotonic() - _liveness["last_contact"]
