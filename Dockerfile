@@ -9,7 +9,7 @@
 #     -e ARES_TOKEN=<registration-token> \
 #     -v ares-agent-data:/data \
 #     --restart unless-stopped \
-#     assailai/ares-agent:3.2.0
+#     assailai/ares-agent:3.2.1
 # =============================================================================
 
 # -----------------------------------------------------------------------------
