@@ -434,3 +434,15 @@ async def test_sample_cpu_percent_returns_none_on_timeout(monkeypatch: pytest.Mo
     monkeypatch.setattr(main, "_CPU_SAMPLE_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(main, "read_cpu_percent", lambda: time.sleep(0.5) or 12.3)
     assert await main._sample_cpu_percent() is None
+
+
+def test_allowed_hosts_keeps_only_strings_and_never_widens() -> None:
+    # ares pushes the hostname destinations of running hunts; anything malformed must degrade to
+    # "no pushed hosts" (the registered networks stay the only way in), never to a wider set.
+    assert main._allowed_hosts(["bank.internal", "echo.internal"]) == [
+        "bank.internal",
+        "echo.internal",
+    ]
+    assert main._allowed_hosts(["bank.internal", 42, None]) == ["bank.internal"]
+    assert main._allowed_hosts(None) == []
+    assert main._allowed_hosts("bank.internal") == []

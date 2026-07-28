@@ -131,6 +131,17 @@ def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
         logger.debug("%s failed (attempt %d): %s", what, failures, exc)
 
 
+def _allowed_hosts(value: object) -> list[str]:
+    """The hostname destinations ares named on this heartbeat, ignoring anything malformed.
+
+    A bad field must never cost us the tunnel, and it must never *widen* the allowlist either:
+    anything that is not a list of strings degrades to "no pushed hosts", which leaves the
+    registered-network rule as the only way in."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 def _write_update_target(version: str) -> None:
     """Record the version the companion updater should move this agent to.
 
@@ -240,7 +251,10 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
             unauthorized = 0
             _record_contact()  # feed the watchdog + refresh the healthcheck marker
             _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
-            tunnel.sync(bool(resp.get("tunnel_required")))
+            tunnel.sync(
+                bool(resp.get("tunnel_required")),
+                _allowed_hosts(resp.get("tunnel_allowed_hosts")),
+            )
             if resp.get("restart_requested"):
                 logger.warning("Restart requested from dashboard; exiting for container restart.")
                 os._exit(0)

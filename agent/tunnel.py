@@ -2,9 +2,20 @@
 
 While an internal hunt is running (the heartbeat says ``tunnel_required``), the agent
 holds one outbound WebSocket to ares. ares opens logical streams over it to internal
-hosts; the agent dials each one locally and relays the bytes. Every target is checked
-against the agent's own network allowlist, so the tunnel can only reach the ranges this
-agent was registered for, never arbitrary internal IPs.
+hosts; the agent dials each one locally and relays the bytes.
+
+Two kinds of destination are authorized, and the agent is the one that decides:
+
+* an **IP literal** must fall inside the agent's own registered networks, exactly as it
+  always has, so a discovered host can only be reached inside the ranges this agent was
+  registered for;
+* a **hostname** is resolved *here*, on the agent's resolver (that is the whole point: the
+  name may only exist on the customer's internal DNS, and split-horizon DNS would give ares
+  the wrong answer). It is allowed when every address it resolves to is inside the registered
+  networks, or when ares named that host in ``tunnel_allowed_hosts`` on the heartbeat, which
+  it only does for the target of a hunt that is actually running. The dial then goes to the
+  address we checked, never back through the resolver, so a second lookup cannot swap the
+  destination out from under the check.
 
 The frame format mirrors ``ares/infra/net/tunnel.py`` byte for byte; the two repos must
 change it together.
@@ -16,8 +27,10 @@ import asyncio
 import ipaddress
 import json
 import logging
+import socket
 import ssl
 import struct
+from collections.abc import Iterable
 
 import websockets
 
@@ -31,6 +44,7 @@ _CLOSE = 5
 _HEADER = struct.Struct(">BQ")
 _RELAY_CHUNK = 65536
 _DIAL_TIMEOUT = 10.0
+_RESOLVE_TIMEOUT = 5.0
 _RECONNECT_BACKOFF_MIN = 1.0
 _RECONNECT_BACKOFF_MAX = 30.0
 
@@ -44,6 +58,12 @@ def _decode(frame: bytes) -> tuple[int, int, bytes]:
     return opcode, stream_id, frame[_HEADER.size :]
 
 
+def _dedupe(values: Iterable[str]) -> list[str]:
+    """The values in first-seen order, without duplicates."""
+    seen: set[str] = set()
+    return [v for v in values if not (v in seen or seen.add(v))]
+
+
 def tunnel_url(base_url: str) -> str:
     """Derive the WebSocket tunnel URL from the control-plane base URL."""
     ws = base_url.rstrip("/")
@@ -54,26 +74,86 @@ def tunnel_url(base_url: str) -> str:
     return f"{ws}/api/v1/agent/tunnel"
 
 
+def normalize_host(host: str) -> str:
+    """Comparable form of a hostname: lowercase, no trailing root dot."""
+    return host.strip().rstrip(".").lower()
+
+
+class Refused(Exception):
+    """The destination is not authorized for this agent; the message is the log reason."""
+
+
 class TunnelClient:
     """One connected WebSocket. Lives for as long as the connection; reconnect is the
-    manager's job."""
+    manager's job.
+
+    ``allowed_hosts`` is shared with the :class:`TunnelManager` and mutated in place as the
+    heartbeat pushes a new set, so a hunt starting or ending never costs a reconnect.
+    """
 
     def __init__(
-        self, url: str, token: str, allowed_networks: list[str], *, insecure: bool
+        self,
+        url: str,
+        token: str,
+        allowed_networks: list[str],
+        allowed_hosts: set[str],
+        *,
+        insecure: bool,
     ) -> None:
         self._url = url
         self._token = token
         self._insecure = insecure
         self._allowed = [ipaddress.ip_network(n, strict=False) for n in allowed_networks]
+        self._allowed_hosts = allowed_hosts
         self._writers: dict[int, asyncio.StreamWriter] = {}
         self._ws: websockets.ClientConnection | None = None
 
-    def _target_allowed(self, host: str) -> bool:
+    def _in_allowed_networks(self, address: str) -> bool:
         try:
-            ip = ipaddress.ip_address(host)
+            ip = ipaddress.ip_address(address)
         except ValueError:
-            return False  # discovered hosts are IPs; never resolve names through the agent
+            return False  # fail closed: an address we cannot parse is never "inside"
         return any(ip in net for net in self._allowed)
+
+    async def _dial_address(self, host: str, port: int) -> str:
+        """The address to dial for ``host``, or raise :class:`Refused`.
+
+        An IP literal must be inside the registered networks. A hostname is resolved here and
+        allowed when *every* address it resolves to is inside them, or when ares pushed the name
+        for a running hunt. Returning a concrete address (not the name) is what keeps the check
+        and the connect on the same destination.
+        """
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            if not self._in_allowed_networks(host):
+                raise Refused(f"{host} is outside this agent's registered networks")
+            return host
+        addresses = await self._resolve(host, port)
+        if all(self._in_allowed_networks(a) for a in addresses):
+            return addresses[0]
+        if normalize_host(host) in self._allowed_hosts:
+            return addresses[0]
+        raise Refused(
+            f"{host} resolves outside this agent's registered networks "
+            f"({', '.join(addresses)}) and is not an approved target of a running assessment"
+        )
+
+    async def _resolve(self, host: str, port: int) -> list[str]:
+        """Resolve ``host`` on this agent's resolver; deduplicated, order preserved."""
+        try:
+            infos = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM),
+                _RESOLVE_TIMEOUT,
+            )
+        except (OSError, asyncio.TimeoutError) as exc:
+            raise Refused(f"{host} did not resolve on this agent: {exc}") from exc
+        addresses = _dedupe(str(info[4][0]) for info in infos)
+        if not addresses:
+            raise Refused(f"{host} resolved to no address on this agent")
+        return addresses
 
     async def run(self) -> None:
         ssl_context: ssl.SSLContext | None = None
@@ -125,18 +205,22 @@ class TunnelClient:
             logger.warning("ignoring malformed OPEN frame: %s", exc)
             await self._send(_encode(_OPEN_ERR, stream_id))
             return
-        if not self._target_allowed(host):
-            logger.warning("refused tunnel target outside allowlist: %s", host)
+        try:
+            address = await self._dial_address(host, port)
+        except Refused as exc:
+            logger.warning("refused tunnel target: %s", exc)
             await self._send(_encode(_OPEN_ERR, stream_id))
             return
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=_DIAL_TIMEOUT
+                asyncio.open_connection(address, port), timeout=_DIAL_TIMEOUT
             )
         except (OSError, asyncio.TimeoutError) as exc:
-            logger.info("tunnel dial to %s:%d failed: %s", host, port, exc)
+            logger.info("tunnel dial to %s:%d failed: %s", address, port, exc)
             await self._send(_encode(_OPEN_ERR, stream_id))
             return
+        if address != host:
+            logger.info("tunnel dialed %s:%d for %s", address, port, host)
         self._writers[stream_id] = writer
         await self._send(_encode(_OPEN_OK, stream_id))
         asyncio.create_task(self._relay_to_ares(stream_id, reader))
@@ -165,17 +249,24 @@ class TunnelClient:
 class TunnelManager:
     """Opens the tunnel while a hunt needs it and tears it down when it does not.
 
-    Driven by the heartbeat: ``sync(tunnel_required)`` each beat. While required, a
-    supervisor keeps a ``TunnelClient`` connected, reconnecting with backoff if the
-    socket drops; when no longer required, it is cancelled.
+    Driven by the heartbeat: ``sync(tunnel_required, allowed_hosts)`` each beat. While required,
+    a supervisor keeps a ``TunnelClient`` connected, reconnecting with backoff if the socket
+    drops; when no longer required, it is cancelled. The pushed host set is updated in place, so
+    the live client sees the current one without reconnecting.
     """
 
     def __init__(self, url: str, token: str, allowed_networks: list[str], *, insecure: bool) -> None:
-        self._args = (url, token, allowed_networks)
+        self._allowed_hosts: set[str] = set()
+        self._args = (url, token, allowed_networks, self._allowed_hosts)
         self._insecure = insecure
         self._task: asyncio.Task[None] | None = None
 
-    def sync(self, required: bool) -> None:
+    def sync(self, required: bool, allowed_hosts: Iterable[str] = ()) -> None:
+        pushed = {normalize_host(h) for h in allowed_hosts if h and h.strip()}
+        if pushed != self._allowed_hosts:
+            logger.info("tunnel hostname destinations: %s", ", ".join(sorted(pushed)) or "none")
+        self._allowed_hosts.clear()
+        self._allowed_hosts.update(pushed)
         running = self._task is not None and not self._task.done()
         if required and not running:
             logger.info("internal hunt active; opening data-plane tunnel")

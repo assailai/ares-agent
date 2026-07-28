@@ -20,6 +20,17 @@ class RegistrationRejected(Exception):
     """The registration token was rejected (expired, already used, or unknown)."""
 
 
+# What this build can do, reported on register *and* on every heartbeat. The heartbeat matters:
+# a self-updating agent keeps its token and never registers again, so a register-only list would
+# stay frozen at whatever the first-ever version could do and the platform would gate features on
+# stale facts. ares mirrors these as ``AgentCapability`` and refuses a launch that needs one this
+# agent does not report.
+CAPABILITIES = [
+    "local_network_scan",  # the TCP-connect discovery scan
+    "tunnel_dns",  # resolve a hostname destination locally and dial it through the tunnel
+]
+
+
 def system_info() -> dict:
     arch_map = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
     arch = arch_map.get(platform.machine().lower(), platform.machine().lower())
@@ -53,7 +64,7 @@ async def register(settings: Settings, *, networks: list[str], name: str) -> dic
         "name": name or None,
         "hostname": socket.gethostname(),
         "agent_version": settings.agent_version,
-        "capabilities": ["local_network_scan"],
+        "capabilities": list(CAPABILITIES),
         "system_info": system_info(),
     }
     async with _client(settings) as client:
@@ -74,7 +85,10 @@ async def heartbeat(
     memory_percent: float | None = None,
     uptime_seconds: int | None = None,
 ) -> dict:
-    body: dict[str, object] = {"agent_version": settings.agent_version}
+    body: dict[str, object] = {
+        "agent_version": settings.agent_version,
+        "capabilities": list(CAPABILITIES),
+    }
     if public_ip is not None:
         body["public_ip"] = public_ip
     if last_handshake_at is not None:

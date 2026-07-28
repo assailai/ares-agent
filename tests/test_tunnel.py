@@ -1,12 +1,26 @@
-"""Data-plane tunnel client: URL derivation, frame codec, the target allowlist, and
-OPEN-frame resilience (a bad or out-of-scope target is refused, never a crash)."""
+"""Data-plane tunnel client: URL derivation, frame codec, destination authorization (IP
+literals against the registered networks, hostnames resolved here and checked either way),
+and OPEN-frame resilience (a bad or out-of-scope target is refused, never a crash)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import socket
 
-from agent.tunnel import _DATA, _OPEN_ERR, TunnelClient, _decode, _encode, tunnel_url
+import pytest
+
+from agent.tunnel import (
+    _DATA,
+    _OPEN_ERR,
+    Refused,
+    TunnelClient,
+    TunnelManager,
+    _decode,
+    _encode,
+    normalize_host,
+    tunnel_url,
+)
 
 
 class _RecordingWS:
@@ -17,6 +31,29 @@ class _RecordingWS:
 
     async def send(self, frame: bytes) -> None:
         self.sent.append(frame)
+
+
+def _client(
+    networks: list[str] | None = None, allowed_hosts: set[str] | None = None
+) -> TunnelClient:
+    return TunnelClient(
+        "ws://x/api/v1/agent/tunnel",
+        "tok",
+        networks if networks is not None else ["10.0.0.0/24", "192.168.1.0/24"],
+        allowed_hosts if allowed_hosts is not None else set(),
+        insecure=False,
+    )
+
+
+def _stub_resolver(client: TunnelClient, mapping: dict[str, list[str]]) -> None:
+    """Resolve names from ``mapping`` instead of touching real DNS; unknown names fail."""
+
+    async def resolve(host: str, port: int) -> list[str]:
+        if host not in mapping:
+            raise Refused(f"{host} did not resolve on this agent")
+        return mapping[host]
+
+    client._resolve = resolve  # type: ignore[method-assign]
 
 
 def test_tunnel_url_maps_scheme_and_path() -> None:
@@ -31,21 +68,104 @@ def test_frame_round_trips() -> None:
     assert _decode(_encode(_DATA, 7, b"hello")) == (_DATA, 7, b"hello")
 
 
-def test_target_allowlist_only_permits_registered_ranges() -> None:
-    client = TunnelClient(
-        "ws://x/api/v1/agent/tunnel",
-        "tok",
-        ["10.0.0.0/24", "192.168.1.0/24"],
-        insecure=False,
-    )
-    assert client._target_allowed("10.0.0.5") is True
-    assert client._target_allowed("192.168.1.200") is True
-    assert client._target_allowed("8.8.8.8") is False  # outside the agent's networks
-    assert client._target_allowed("evil.example.com") is False  # names are never resolved
+def test_normalize_host_is_case_and_root_dot_insensitive() -> None:
+    assert normalize_host("Bank.Internal.") == "bank.internal"
+    assert normalize_host("  bank.internal ") == "bank.internal"
 
 
-def _client_with_ws() -> tuple[TunnelClient, _RecordingWS]:
-    client = TunnelClient("ws://x/api/v1/agent/tunnel", "tok", ["10.0.0.0/24"], insecure=False)
+# ── IP literals: unchanged behaviour ──────────────────────────────────────────
+def test_ip_inside_registered_networks_is_dialed_as_is() -> None:
+    client = _client()
+    assert asyncio.run(client._dial_address("10.0.0.5", 80)) == "10.0.0.5"
+    assert asyncio.run(client._dial_address("192.168.1.200", 443)) == "192.168.1.200"
+
+
+def test_ip_outside_registered_networks_is_refused() -> None:
+    client = _client()
+    with pytest.raises(Refused):
+        asyncio.run(client._dial_address("8.8.8.8", 53))
+
+
+# ── hostnames: resolved here, then authorized ─────────────────────────────────
+def test_name_resolving_into_registered_networks_is_allowed() -> None:
+    client = _client()
+    _stub_resolver(client, {"bank.internal": ["10.0.0.7"]})
+    assert asyncio.run(client._dial_address("bank.internal", 8000)) == "10.0.0.7"
+
+
+def test_name_resolving_outside_networks_is_refused_without_a_pushed_host() -> None:
+    client = _client()
+    _stub_resolver(client, {"staging.acme.com": ["203.0.113.10"]})
+    with pytest.raises(Refused, match="not an approved target"):
+        asyncio.run(client._dial_address("staging.acme.com", 443))
+
+
+def test_pushed_host_allows_a_name_outside_the_networks() -> None:
+    client = _client(allowed_hosts={"staging.acme.com"})
+    _stub_resolver(client, {"staging.acme.com": ["203.0.113.10"]})
+    assert asyncio.run(client._dial_address("staging.acme.com", 443)) == "203.0.113.10"
+
+
+def test_pushed_host_match_ignores_case_and_root_dot() -> None:
+    client = _client(allowed_hosts={"staging.acme.com"})
+    _stub_resolver(client, {"Staging.Acme.com.": ["203.0.113.10"]})
+    assert asyncio.run(client._dial_address("Staging.Acme.com.", 443)) == "203.0.113.10"
+
+
+def test_a_name_is_refused_once_its_host_leaves_the_pushed_set() -> None:
+    # the set is shared with the manager and mutated in place, so a hunt ending closes the door
+    # on the live connection without a reconnect.
+    hosts = {"staging.acme.com"}
+    client = _client(allowed_hosts=hosts)
+    _stub_resolver(client, {"staging.acme.com": ["203.0.113.10"]})
+    assert asyncio.run(client._dial_address("staging.acme.com", 443)) == "203.0.113.10"
+    hosts.clear()
+    with pytest.raises(Refused):
+        asyncio.run(client._dial_address("staging.acme.com", 443))
+
+
+def test_a_name_with_any_address_outside_the_networks_needs_the_pushed_set() -> None:
+    # a split answer must not sneak past on the strength of one in-network address.
+    client = _client()
+    _stub_resolver(client, {"mixed.internal": ["10.0.0.7", "8.8.8.8"]})
+    with pytest.raises(Refused):
+        asyncio.run(client._dial_address("mixed.internal", 80))
+
+
+def test_unresolvable_name_is_refused() -> None:
+    client = _client()
+    _stub_resolver(client, {})
+    with pytest.raises(Refused, match="did not resolve"):
+        asyncio.run(client._dial_address("nowhere.internal", 80))
+
+
+def test_resolve_deduplicates_and_preserves_order() -> None:
+    client = _client()
+
+    async def fake_getaddrinfo(host: str, port: int, **kwargs: object) -> list[tuple]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.7", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.7", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", port)),
+        ]
+
+    async def run() -> list[str]:
+        asyncio.get_running_loop().getaddrinfo = fake_getaddrinfo  # type: ignore[method-assign]
+        return await client._resolve("bank.internal", 8000)
+
+    assert asyncio.run(run()) == ["10.0.0.7", "10.0.0.8"]
+
+
+def test_unparseable_address_is_never_treated_as_inside_the_networks() -> None:
+    client = _client(networks=["10.0.0.0/8", "fe80::/10"])
+    assert client._in_allowed_networks("not-an-address") is False
+    # a scope id is legal and still compared on the address itself.
+    assert client._in_allowed_networks("fe80::1%eth0") is True
+
+
+# ── OPEN-frame handling ───────────────────────────────────────────────────────
+def _client_with_ws(allowed_hosts: set[str] | None = None) -> tuple[TunnelClient, _RecordingWS]:
+    client = _client(["10.0.0.0/24"], allowed_hosts)
     ws = _RecordingWS()
     client._ws = ws
     return client, ws
@@ -63,3 +183,42 @@ def test_open_outside_allowlist_is_refused() -> None:
     client, ws = _client_with_ws()
     asyncio.run(client._open(9, json.dumps({"host": "8.8.8.8", "port": 53}).encode()))
     assert _decode(ws.sent[0])[:2] == (_OPEN_ERR, 9)
+
+
+def test_open_with_an_unauthorized_name_is_refused() -> None:
+    client, ws = _client_with_ws()
+    _stub_resolver(client, {"evil.example.com": ["203.0.113.10"]})
+    asyncio.run(client._open(11, json.dumps({"host": "evil.example.com", "port": 80}).encode()))
+    assert _decode(ws.sent[0])[:2] == (_OPEN_ERR, 11)
+
+
+def test_open_dials_the_resolved_address_not_the_name() -> None:
+    # the check and the connect must land on the same destination, so the dial uses the address
+    # we authorized rather than going back through the resolver.
+    client, ws = _client_with_ws({"bank.internal"})
+    _stub_resolver(client, {"bank.internal": ["203.0.113.10"]})
+    dialed: list[tuple[str, int]] = []
+
+    async def fake_open_connection(host: str, port: int):
+        dialed.append((host, port))
+        raise OSError("no listener in the test")
+
+    original = asyncio.open_connection
+    asyncio.open_connection = fake_open_connection  # type: ignore[assignment]
+    try:
+        asyncio.run(client._open(13, json.dumps({"host": "bank.internal", "port": 8000}).encode()))
+    finally:
+        asyncio.open_connection = original  # type: ignore[assignment]
+    assert dialed == [("203.0.113.10", 8000)]
+    assert _decode(ws.sent[0])[:2] == (_OPEN_ERR, 13)  # the dial failed, so the stream fails
+
+
+# ── manager: the pushed set ───────────────────────────────────────────────────
+def test_manager_sync_replaces_the_pushed_host_set_in_place() -> None:
+    manager = TunnelManager("ws://x", "tok", ["10.0.0.0/24"], insecure=False)
+    shared = manager._args[3]
+    manager.sync(False, ["Bank.Internal.", "  ", "staging.acme.com"])
+    assert shared == {"bank.internal", "staging.acme.com"}
+    manager.sync(False, [])
+    assert shared == set()
+    assert shared is manager._args[3]  # the live client holds this object
