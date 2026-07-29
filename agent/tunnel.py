@@ -79,6 +79,15 @@ def normalize_host(host: str) -> str:
     return host.strip().rstrip(".").lower()
 
 
+def is_ip_literal(value: str) -> bool:
+    """Whether ``value`` is already an address, so nothing needs resolving."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 class Refused(Exception):
     """The destination is not authorized for this agent; the message is the log reason."""
 
@@ -123,18 +132,14 @@ class TunnelClient:
         for a running hunt. Returning a concrete address (not the name) is what keeps the check
         and the connect on the same destination.
         """
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            pass
-        else:
+        if is_ip_literal(host):
             if not self._in_allowed_networks(host):
                 raise Refused(f"{host} is outside this agent's registered networks")
             return host
         addresses = await self._resolve(host, port)
-        if all(self._in_allowed_networks(a) for a in addresses):
-            return addresses[0]
-        if normalize_host(host) in self._allowed_hosts:
+        inside_networks = all(self._in_allowed_networks(a) for a in addresses)
+        approved_by_ares = normalize_host(host) in self._allowed_hosts
+        if inside_networks or approved_by_ares:
             return addresses[0]
         raise Refused(
             f"{host} resolves outside this agent's registered networks "
