@@ -14,11 +14,13 @@ from agent.tunnel import (
     _DATA,
     _OPEN_ERR,
     Refused,
+    RefusalLog,
     TunnelClient,
     TunnelManager,
     _decode,
     _encode,
     normalize_host,
+    summarize_addresses,
     tunnel_url,
 )
 
@@ -218,3 +220,59 @@ def test_manager_sync_replaces_the_pushed_host_set_in_place() -> None:
     manager.sync(False, [])
     assert shared == set()
     assert shared is manager._allowed_hosts  # the live client holds this same object
+
+
+# ── refusal logging: readable at hundreds-per-run volumes ─────────────────────
+def test_summarize_addresses_names_a_few_then_counts_the_rest() -> None:
+    assert summarize_addresses(["1.1.1.1", "2.2.2.2"]) == "1.1.1.1, 2.2.2.2"
+    many = [f"10.0.0.{n}" for n in range(1, 9)]
+    assert summarize_addresses(many) == "10.0.0.1, 10.0.0.2, 10.0.0.3, +5 more"
+
+
+def test_a_refused_host_is_explained_once_then_only_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One assessment refuses the same telemetry host hundreds of times; a per-dial WARNING would
+    bury the refusal an operator actually needs to see."""
+    log = RefusalLog()
+    with caplog.at_level("INFO", logger="ares.agent.tunnel"):
+        for _ in range(50):
+            log.record("autofill.example.com", "autofill.example.com resolves outside ...")
+        log.record("other.example.com", "other.example.com resolves outside ...")
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 2  # one per host, not one per dial
+        assert not [r for r in caplog.records if r.levelname == "INFO"]  # rollup not due yet
+
+        caplog.clear()
+        log.flush()
+        rollup = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+
+    assert len(rollup) == 1
+    assert "49 further tunnel dial(s) to 1 already-reported host(s)" in rollup[0]
+    assert "autofill.example.com x49" in rollup[0]
+
+
+def test_flush_is_quiet_when_nothing_was_suppressed(caplog: pytest.LogCaptureFixture) -> None:
+    log = RefusalLog()
+    with caplog.at_level("INFO", logger="ares.agent.tunnel"):
+        log.record("one.example.com", "one.example.com resolves outside ...")
+        caplog.clear()
+        log.flush()
+        log.flush()
+    assert caplog.records == []  # no empty rollups, and no re-explaining a reported host
+
+
+def test_open_records_the_refusal_once_per_host(caplog: pytest.LogCaptureFixture) -> None:
+    """The OPEN path must route refusals through the collapsing log, not straight to a WARNING."""
+    client = _client()
+    client._ws = _RecordingWS()  # type: ignore[assignment]
+    _stub_resolver(client, {"evil.example.com": ["8.8.8.8"]})
+    frame = json.dumps({"host": "evil.example.com", "port": 80}).encode()
+    with caplog.at_level("INFO", logger="ares.agent.tunnel"):
+        for stream_id in range(5):
+            asyncio.run(client._open(stream_id, frame))
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "not an approved target" in warnings[0].getMessage()

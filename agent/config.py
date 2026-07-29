@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agent.__version__ import __version__
@@ -21,7 +21,10 @@ class Settings(BaseSettings):
 
     # One-time registration token minted in the Ares dashboard (Settings -> Agents).
     # REQUIRED: the agent exits with a clear message if it is missing.
-    token: str = ""
+    # SecretStr, not str, so the value cannot reach a log by accident: this settings object is the
+    # one place the enrollment token lives, and a plain str would render in full through any
+    # `repr(settings)` or unhandled pydantic validation error. Read it with `.get_secret_value()`.
+    token: SecretStr = SecretStr("")
     # Base URL of the Ares control plane.
     url: str = "https://api.assailai.com"
     # Optional comma-separated CIDRs that override auto-detected internal networks.

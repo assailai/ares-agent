@@ -23,6 +23,15 @@ _TIMEOUT = 300.0
 _VERIFY_CHECKS = 5
 _VERIFY_INTERVAL = 2.0
 
+# Container ``Config`` keys the *operator* owns, so they have to survive a recreate. Everything
+# else in ``Config`` (``Entrypoint``, ``Cmd``, ``Healthcheck``, ``User``, ``WorkingDir``,
+# ``Volumes``, ``ExposedPorts``, ``StopSignal``, ...) is contributed by the image, and an explicit
+# value in a create body OVERRIDES the new image's own - so copying those forward would pin an
+# updated agent to the old image's behaviour and a release that changed its entrypoint or
+# healthcheck would be silently ignored on every deployed agent. ``Env`` carries ``ARES_TOKEN`` and
+# every other ``ARES_*`` setting, so it is preserved verbatim rather than diffed against the image.
+_OPERATOR_OWNED = ("Env",)
+
 
 class DockerBackend:
     def available(self) -> bool:
@@ -45,10 +54,15 @@ class DockerBackend:
             old.raise_for_status()
             attrs = old.json()
 
-            # clear any leftover from a prior aborted run, then start the replacement with the
-            # old container's config and only the image swapped.
+            # clear any leftover from a prior aborted run, then start the replacement carrying only
+            # what the operator owns: the new image supplies the rest. HostConfig is preserved
+            # wholesale because it *is* the operator's (mounts, restart policy, network).
             docker.delete(f"/containers/{next_name}", params={"force": "true"})
-            body = {**attrs["Config"], "Image": image_ref, "HostConfig": attrs["HostConfig"]}
+            body = {
+                **_operator_config(docker, attrs),
+                "Image": image_ref,
+                "HostConfig": attrs["HostConfig"],
+            }
             created = docker.post("/containers/create", params={"name": next_name}, json=body)
             created.raise_for_status()
             cid = created.json()["Id"]
@@ -69,6 +83,46 @@ def _client() -> httpx.Client:
     return httpx.Client(
         transport=httpx.HTTPTransport(uds=str(_SOCK)), base_url="http://docker", timeout=_TIMEOUT
     )
+
+
+def _operator_labels(docker: httpx.Client, attrs: dict) -> dict[str, str]:
+    """The old container's labels minus the ones its image contributed.
+
+    A container inherits its image's labels, so copying them onto the replacement re-pins
+    ``org.opencontainers.image.version`` (and ``revision``, ``created``, ...) to the version the
+    agent was FIRST deployed at: ``docker inspect`` then reports a version the agent is not running,
+    forever. Docker merges an image's labels in for every key the create body does *not* set, so
+    passing only the operator's own labels lets the new image's real ones through.
+
+    Fails toward dropping: if the old image cannot be inspected we keep none, so the new image's
+    labels are still correct and only custom operator labels are lost.
+    """
+    labels: dict[str, str] = attrs["Config"].get("Labels") or {}
+    if not labels:
+        return {}
+    try:
+        resp = docker.get(f"/images/{attrs['Image']}/json")
+        resp.raise_for_status()
+        from_image: dict[str, str] = resp.json()["Config"].get("Labels") or {}
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        logger.warning(
+            "could not read the old image's labels (%s); the replacement inherits the new "
+            "image's labels and drops any operator-set ones",
+            exc,
+        )
+        return {}
+    return {key: value for key, value in labels.items() if from_image.get(key) != value}
+
+
+def _operator_config(docker: httpx.Client, attrs: dict) -> dict:
+    """The slice of the old container's ``Config`` that the replacement must carry over."""
+    config: dict = {
+        key: attrs["Config"][key] for key in _OPERATOR_OWNED if key in attrs["Config"]
+    }
+    labels = _operator_labels(docker, attrs)
+    if labels:  # omitted entirely when empty, so the new image's labels apply unshadowed
+        config["Labels"] = labels
+    return config
 
 
 def _stays_up(docker: httpx.Client, cid: str) -> bool:
