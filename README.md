@@ -203,8 +203,8 @@ Notes:
   need it installed locally):
 
   ```bash
-  docker run --rm --entrypoint cosign assailai/ares-updater:3.3.1 \
-    verify assailai/ares-agent:3.3.1 \
+  docker run --rm --entrypoint cosign assailai/ares-updater:3.3.2 \
+    verify assailai/ares-agent:3.3.2 \
     --certificate-identity-regexp '^https://github\.com/assailai/docker-agent-ares/\.github/workflows/docker-build\.yml@refs/(heads/main|tags/v.*)$' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
   ```
@@ -248,6 +248,22 @@ docker volume rm ares-agent-data
 
 We use [Semantic Versioning](https://semver.org/). For available versions, see the
 [tags on Docker Hub](https://hub.docker.com/r/assailai/ares-agent/tags).
+
+### Cutting a release
+
+`agent/__version__.py` is the trigger. Bump it, move the pins that name the old version
+(`scripts/bootstrap.sh`, `docker-compose.yml`, `deploy/k8s/ares-agent.yaml`), and merge to `main`.
+`auto-tag.yml` then creates the `v<version>` tag and the GitHub release, and builds, pushes and
+cosign-signs both images (`assailai/ares-agent` and `assailai/ares-updater`) as
+`<version>`, `<major>.<minor>` and `<major>`.
+
+Two things that are easy to get wrong:
+
+- **Don't push the `v<version>` tag by hand.** `auto-tag.yml` skips its image build when the tag
+  already exists, so a hand-pushed tag leaves you with a tag and a release but **no images**.
+- **A release that changes `updater/` does not roll itself out.** The updater keeps the *agent*
+  current; nothing updates the updater. Every deployment has to recreate it before the change takes
+  effect — see [Auto-update](#auto-update-the-companion-updater).
 
 ## Support
 
