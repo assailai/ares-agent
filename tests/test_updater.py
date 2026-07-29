@@ -160,6 +160,99 @@ def test_docker_apply_verifies_new_then_swaps(monkeypatch: pytest.MonkeyPatch) -
     assert ("POST", "/containers/new123/rename") in calls
 
 
+def _apply_capturing_create_body(
+    monkeypatch: pytest.MonkeyPatch, *, old_container: dict, image_response: httpx.Response
+) -> dict:
+    """Run one ``apply`` against a mocked dockerd and return the ``/containers/create`` body."""
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/containers/create":
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={"Id": "new123"})
+        if path.startswith("/images/") and path.endswith("/json"):
+            return image_response
+        if path.endswith("/json"):
+            return httpx.Response(200, json=old_container)
+        return httpx.Response(200, text="")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://docker")
+    monkeypatch.setattr(dockerd, "_client", lambda: client)
+    monkeypatch.setattr(dockerd.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(dockerd, "_VERIFY_CHECKS", 1)
+
+    DockerBackend().apply(_settings(), "assailai/ares-agent:3.3.3")
+
+    assert len(bodies) == 1
+    return bodies[0]
+
+
+_OLD_CONTAINER = {
+    "Image": "sha256:oldimage",
+    "Config": {
+        "Env": ["ARES_TOKEN=t", "PATH=/usr/bin"],
+        # the version label was inherited from the OLD image; customer.tier is the operator's own.
+        "Labels": {"org.opencontainers.image.version": "3.3.0", "customer.tier": "gold"},
+        "Entrypoint": ["/old-entrypoint"],
+        "Cmd": ["serve"],
+        "Healthcheck": {"Test": ["CMD", "/old-check"]},
+        "User": "10001",
+        "WorkingDir": "/old-app",
+    },
+    "HostConfig": {"Binds": ["ares-agent-data:/data"], "RestartPolicy": {"Name": "always"}},
+    "State": {"Running": True},
+}
+
+
+def test_docker_apply_carries_only_the_operator_owned_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement must not shadow the new image's own config with the old image's.
+
+    Regression (July 2026): ``apply`` copied the old container's whole ``Config`` forward, so an
+    updated agent kept reporting ``org.opencontainers.image.version`` from the version it was FIRST
+    deployed at - ``docker inspect`` claimed 3.3.0 on a container genuinely running 3.3.2 - and a
+    release that changed its entrypoint or healthcheck would have been silently ignored.
+    """
+    body = _apply_capturing_create_body(
+        monkeypatch,
+        old_container=_OLD_CONTAINER,
+        image_response=httpx.Response(
+            200, json={"Config": {"Labels": {"org.opencontainers.image.version": "3.3.0"}}}
+        ),
+    )
+
+    # the image-contributed label is left unset, so the NEW image's real version comes through and
+    # docker inspect reports what the agent is actually running.
+    assert body["Labels"] == {"customer.tier": "gold"}
+    # what the operator owns survives: env (ARES_TOKEN et al) and the whole HostConfig.
+    assert body["Env"] == ["ARES_TOKEN=t", "PATH=/usr/bin"]
+    assert body["HostConfig"] == _OLD_CONTAINER["HostConfig"]
+    assert body["Image"] == "assailai/ares-agent:3.3.3"
+    # everything the image owns is left to the new image rather than pinned to the old one.
+    for key in ("Entrypoint", "Cmd", "Healthcheck", "User", "WorkingDir"):
+        assert key not in body, f"{key} must come from the new image, not the old container"
+
+
+def test_docker_apply_drops_labels_when_the_old_image_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable old image: keep no labels at all rather than carrying the stale ones.
+
+    Losing a custom operator label is the safe direction; reporting a version the agent is not
+    running is not.
+    """
+    body = _apply_capturing_create_body(
+        monkeypatch,
+        old_container=_OLD_CONTAINER,
+        image_response=httpx.Response(404, json={"message": "no such image"}),
+    )
+
+    assert "Labels" not in body
+    assert body["Env"] == ["ARES_TOKEN=t", "PATH=/usr/bin"]  # env still survives
+
+
 def test_k8s_apply_patches_the_deployment_image(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
 

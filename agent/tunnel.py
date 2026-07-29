@@ -30,6 +30,8 @@ import logging
 import socket
 import ssl
 import struct
+import time
+from collections import Counter
 from collections.abc import Iterable
 
 import websockets
@@ -47,6 +49,12 @@ _DIAL_TIMEOUT = 10.0
 _RESOLVE_TIMEOUT = 5.0
 _RECONNECT_BACKOFF_MIN = 1.0
 _RECONNECT_BACKOFF_MAX = 30.0
+_ADDRESSES_NAMED = 3  # resolved addresses a refusal names before it counts the rest
+_ROLLUP_INTERVAL = 60.0  # seconds between rollups of the repeats that were not logged in full
+# Distinct hosts explained in full before the log falls back to counting. The page under test decides
+# what the browser dials, so a page referencing a thousand third parties would otherwise still cost a
+# thousand WARNING lines.
+_HOSTS_REPORTED_MAX = 50
 
 
 def _encode(opcode: int, stream_id: int, payload: bytes = b"") -> bytes:
@@ -86,6 +94,63 @@ class Refused(Exception):
     """The destination is not authorized for this agent; the message is the log reason."""
 
 
+def summarize_addresses(addresses: list[str]) -> str:
+    """Name the first few addresses and count the rest, so one refusal stays one readable line.
+
+    A name behind a large CDN or anycast pool resolves to a dozen-plus A/AAAA records; printing all
+    of them turns every refusal into an unreadable wall.
+    """
+    if len(addresses) <= _ADDRESSES_NAMED:
+        return ", ".join(addresses)
+    named = ", ".join(addresses[:_ADDRESSES_NAMED])
+    return f"{named}, +{len(addresses) - _ADDRESSES_NAMED} more"
+
+
+class RefusalLog:
+    """Collapses repeated refusals into one full line per host plus a periodic rollup.
+
+    A browser driven through the tunnel re-dials its vendor's telemetry and the target page's
+    third-party assets on every page load, so one assessment refuses the same handful of hosts
+    hundreds of times. Logged once per dial, that buries the refusal an operator actually needs to
+    see (a dial at something they did not expect). So a host is reported in full the first time it is
+    refused, up to ``_HOSTS_REPORTED_MAX`` distinct hosts, and everything after that is counted into
+    a rollup instead.
+    """
+
+    def __init__(self) -> None:
+        self._reported: set[str] = set()
+        self._suppressed: Counter[str] = Counter()
+        self._last_rollup = time.monotonic()
+
+    def record(self, host: str, reason: str) -> None:
+        unseen = host not in self._reported
+        if unseen and len(self._reported) < _HOSTS_REPORTED_MAX:
+            self._reported.add(host)
+            logger.warning("refused tunnel target: %s", reason)
+        else:
+            self._suppressed[host] += 1
+        if time.monotonic() - self._last_rollup >= _ROLLUP_INTERVAL:
+            self.flush()
+
+    def flush(self) -> None:
+        """Report the repeats counted since the last rollup, then reset the clock.
+
+        Called on the interval and again at close, so the final batch is never lost. ``_reported``
+        deliberately survives a flush: a host already explained in full should not be explained
+        again on the next one.
+        """
+        self._last_rollup = time.monotonic()
+        if not self._suppressed:
+            return
+        logger.info(
+            "refused %d further tunnel dial(s) to %d host(s): %s",
+            sum(self._suppressed.values()),
+            len(self._suppressed),
+            ", ".join(f"{host} x{n}" for host, n in self._suppressed.most_common()),
+        )
+        self._suppressed.clear()
+
+
 class TunnelClient:
     """One connected WebSocket. Lives for as long as the connection; reconnect is the
     manager's job.
@@ -110,6 +175,7 @@ class TunnelClient:
         self._allowed_hosts = allowed_hosts
         self._writers: dict[int, asyncio.StreamWriter] = {}
         self._ws: websockets.ClientConnection | None = None
+        self._refusals = RefusalLog()
 
     def _in_allowed_networks(self, address: str) -> bool:
         try:
@@ -137,7 +203,8 @@ class TunnelClient:
             return addresses[0]
         raise Refused(
             f"{host} resolves outside this agent's registered networks "
-            f"({', '.join(addresses)}) and is not an approved target of a running assessment"
+            f"({summarize_addresses(addresses)}) and is not an approved target of a running "
+            "assessment"
         )
 
     async def _resolve(self, host: str, port: int) -> list[str]:
@@ -178,6 +245,7 @@ class TunnelClient:
                     except Exception as exc:  # noqa: BLE001 - one bad frame must not drop the tunnel
                         logger.warning("error handling tunnel frame: %s", exc)
             finally:
+                self._refusals.flush()  # so the last batch of repeats is never lost
                 for writer in self._writers.values():
                     writer.close()
                 self._writers.clear()
@@ -207,7 +275,7 @@ class TunnelClient:
         try:
             address = await self._dial_address(host, port)
         except Refused as exc:
-            logger.warning("refused tunnel target: %s", exc)
+            self._refusals.record(host, str(exc))
             await self._send(_encode(_OPEN_ERR, stream_id))
             return
         try:

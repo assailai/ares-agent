@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from agent import main
 from agent.state import AgentState
@@ -210,7 +211,7 @@ async def test_run_adopts_a_fresh_identity_on_reenroll(
     monkeypatch.setattr(main, "TunnelManager", _FakeTunnel)
     monkeypatch.setattr(main, "tunnel_url", lambda url: url)
     monkeypatch.setattr(main.netdetect, "detect_networks", lambda: ["10.0.0.0/24"])
-    monkeypatch.setattr(main.settings, "token", "ares_agt_fresh")
+    monkeypatch.setattr(main.settings, "token", SecretStr("ares_agt_fresh"))
     monkeypatch.setattr(main.settings, "insecure", False)
     monkeypatch.setattr(main.settings, "data_dir", tmp_path)
 
@@ -323,7 +324,7 @@ async def test_run_advertises_auto_scoped_networks(
 
     monkeypatch.setattr(main, "_enroll", _enroll)
     monkeypatch.setattr(main.netdetect, "scan_targets", lambda scope: ["10.9.0.0/16"])
-    monkeypatch.setattr(main.settings, "token", "ares_agt_x")
+    monkeypatch.setattr(main.settings, "token", SecretStr("ares_agt_x"))
     monkeypatch.setattr(main.settings, "insecure", False)
     monkeypatch.setattr(main.settings, "networks", "")
     monkeypatch.setattr(main.settings, "data_dir", tmp_path)
@@ -446,3 +447,33 @@ def test_allowed_hosts_keeps_only_strings_and_never_widens() -> None:
     assert main._allowed_hosts(["bank.internal", 42, None]) == ["bank.internal"]
     assert main._allowed_hosts(None) == []
     assert main._allowed_hosts("bank.internal") == []
+
+
+# ── logging configuration: verbosity is ours to raise, never the dependencies' ──
+def test_debug_log_level_does_not_enable_third_party_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARES_LOG_LEVEL=DEBUG must raise our verbosity only.
+
+    ``websockets`` logs every frame it relays at DEBUG and a frame's repr renders the payload as
+    hex, so letting the level reach the root logger would hex-dump the customer's own tunnelled
+    traffic (in plaintext whenever the target speaks http) into their agent log.
+    """
+    monkeypatch.setattr(main.settings, "log_level", "DEBUG")
+    main._configure_logging()
+
+    assert logging.getLogger("ares.agent.tunnel").isEnabledFor(logging.DEBUG)
+    for noisy in ("websockets", "httpx", "httpcore", "asyncio"):
+        assert not logging.getLogger(noisy).isEnabledFor(logging.DEBUG), noisy
+
+
+def test_the_enrollment_token_never_renders_in_a_log_or_repr() -> None:
+    """The token is the one credential this process holds; it must not be printable by accident."""
+    from agent.config import Settings
+
+    settings = Settings(token="super-secret-enrollment-token")  # type: ignore[arg-type]
+    assert "super-secret-enrollment-token" not in repr(settings)
+    assert "super-secret-enrollment-token" not in str(settings)
+    assert "super-secret-enrollment-token" not in f"{settings.token}"
+    # ...but the real value is still reachable where it is genuinely needed.
+    assert settings.token.get_secret_value() == "super-secret-enrollment-token"

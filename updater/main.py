@@ -24,10 +24,14 @@ _BACKENDS: list[Backend] = [K8sBackend(), DockerBackend()]
 
 
 def _configure_logging() -> None:
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    """Raise the verbosity of ``ares.*`` only, never of the dependencies.
+
+    Same reasoning as the agent's: handing the level to ``basicConfig`` sets the **root** level and
+    would enable third-party DEBUG (httpcore traces every request over the docker socket). Root
+    stays INFO; only our own loggers follow ``ARES_LOG_LEVEL``.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("ares").setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
 
 
 def _pick_backend() -> Backend | None:

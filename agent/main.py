@@ -78,10 +78,21 @@ _CPU_SAMPLE_TIMEOUT_SECONDS = 5
 
 
 def _configure_logging() -> None:
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    """Configure logging so ``ARES_LOG_LEVEL`` only ever raises the verbosity of *our* loggers.
+
+    The level is deliberately NOT handed to ``basicConfig``: that sets the **root** level, which
+    would turn on DEBUG for every dependency too. ``websockets`` logs each frame it sends and
+    receives at DEBUG (``protocol.py``: ``logger.debug("< %s", frame)``), and a frame's repr renders
+    the payload as hex - which for the data-plane tunnel is the customer's own relayed traffic, in
+    plaintext whenever the target speaks http. An operator raising the log level to debug their
+    agent must never start dumping that.
+
+    Root stays at INFO so third-party DEBUG records are dropped at their own logger; ``ares.*`` gets
+    the configured level. This works because the root *handler* is left at NOTSET, so a DEBUG record
+    admitted by ``ares.agent`` still reaches it.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("ares").setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
 
 
 def _resolve_scan_limits() -> None:
@@ -437,7 +448,7 @@ async def _serve(state: AgentState, tunnel: TunnelManager) -> None:
 
 async def run() -> int:
     _configure_logging()
-    if not settings.token:
+    if not settings.token.get_secret_value():
         logger.error(
             "ARES_TOKEN is required. Generate a registration token in the Ares dashboard "
             "(Settings -> Agents) and pass it as -e ARES_TOKEN=..."

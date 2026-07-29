@@ -59,7 +59,7 @@ def _auth(token: str) -> dict[str, str]:
 
 async def register(settings: Settings, *, networks: list[str], name: str) -> dict:
     body = {
-        "registration_token": settings.token,
+        "registration_token": settings.token.get_secret_value(),
         "internal_networks": networks,
         "name": name or None,
         "hostname": socket.gethostname(),

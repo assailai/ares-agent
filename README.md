@@ -203,8 +203,8 @@ Notes:
   need it installed locally):
 
   ```bash
-  docker run --rm --entrypoint cosign assailai/ares-updater:3.3.2 \
-    verify assailai/ares-agent:3.3.2 \
+  docker run --rm --entrypoint cosign assailai/ares-updater:3.3.3 \
+    verify assailai/ares-agent:3.3.3 \
     --certificate-identity-regexp '^https://github\.com/assailai/docker-agent-ares/\.github/workflows/docker-build\.yml@refs/(heads/main|tags/v.*)$' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
   ```
