@@ -32,8 +32,14 @@ host privileges to grant.
 3. **Scan** - when you launch an internal hunt, the agent runs a TCP-connect scan of the
    approved CIDRs and reports the live hosts it found.
 4. **Reach-in** - while a hunt is running the agent opens an outbound WebSocket back to Ares and
-   proxies TCP streams to the discovered hosts, restricted to the networks you approved. The
-   tunnel is closed when no hunt is active.
+   proxies TCP streams to the destination being assessed. The tunnel is closed when no hunt is
+   active. Two kinds of destination are allowed, and the agent decides:
+   - an **IP address** must be inside the networks you approved for this agent;
+   - a **hostname** is resolved by *this host*, on your own DNS, which is how Ares assesses a URL
+     that only exists inside your network. It is allowed when every address it resolves to is
+     inside your approved networks, or when it is the target of an assessment you launched in
+     Ares (Ares names that host on the heartbeat, and only while the run is live). The agent then
+     connects to the address it checked, so a second lookup cannot redirect the connection.
 
 ## Getting started
 
@@ -153,7 +159,9 @@ whatever ports your hunt targets (commonly 80, 443, 8080, 8443).
   no `NET_ADMIN`, no `/dev/net/tun`, and no host `sysctl` changes.
 - **Outbound-only** - the agent initiates every connection. Nothing listens for inbound traffic.
 - **Scoped reach-in** - the data-plane tunnel only proxies to the networks you approved for the
-  agent, enforced on the agent side. It exists only while a hunt is running.
+  agent, or to the hostname of a target you explicitly approved and launched in Ares, enforced on
+  the agent side. It exists only while a hunt is running. Names are resolved here, never in the
+  cloud, and every refusal is logged with its reason.
 - **Minimal image** - multi-stage Alpine build with runtime dependencies only; no secrets baked
   into the image.
 - **Token at rest** - the agent's auth token lives in the `/data` volume (mode 0700), supplied at
