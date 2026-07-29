@@ -16,6 +16,9 @@ from updater.config import UpdaterSettings, repo_of
 logger = logging.getLogger("ares.updater.verify")
 
 _COSIGN_TIMEOUT = 120
+# enough for cosign's "none of the expected identities matched ... got subjects [...]" line, which
+# carries the certificate subject we need to diagnose a mismatch (300 chars used to clip it).
+_STDERR_LOG_CHARS = 800
 
 
 def verify(image_ref: str, settings: UpdaterSettings) -> str | None:
@@ -53,8 +56,14 @@ def verify(image_ref: str, settings: UpdaterSettings) -> str | None:
         logger.error("cosign could not run (%s); refusing %s.", exc, image_ref)
         return None
     if result.returncode != 0:
+        # log what we expected alongside what cosign saw: an identity mismatch is otherwise
+        # indistinguishable from an unsigned image, and the two have very different fixes.
         logger.error(
-            "signature verification FAILED for %s: %s", image_ref, result.stderr.strip()[:300]
+            "signature verification FAILED for %s (expected signer %s, issuer %s): %s",
+            image_ref,
+            settings.cosign_key or settings.cosign_identity,
+            settings.cosign_issuer,
+            result.stderr.strip()[:_STDERR_LOG_CHARS],
         )
         return None
 
