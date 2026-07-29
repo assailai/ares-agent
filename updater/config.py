@@ -29,15 +29,28 @@ class UpdaterSettings(BaseSettings):
     require_signature: bool = True
     # cosign keyless verification (preferred): the expected signer identity, an ANCHORED regexp
     # (cosign's -regexp flags are substring matches, so anchor with ^...$ and escape dots) matched
-    # against the signing workflow's OIDC identity. Only released versions verify: the ref is
-    # refs/tags/v* (main / latest / sha images carry refs/heads/main and intentionally do not
-    # verify, so the updater only rolls forward to released versions). Plus the OIDC issuer below.
+    # against the certificate Fulcio issued to the signing job. Plus the OIDC issuer below.
+    #
+    # Two things decide what that identity actually says, and both are easy to get wrong:
+    #   * the workflow FILE is the one holding the `cosign sign` step (docker-build.yml), because
+    #     Fulcio takes the SAN from the OIDC job_workflow_ref claim - NOT the entrypoint workflow
+    #     that calls it. Naming the caller (docker-publish.yml) is a regexp that can never match.
+    #   * the REF is the caller's ref, since docker-build.yml is invoked as a local reusable
+    #     workflow. The release path (auto-tag.yml, on a version-bump merge) therefore signs at
+    #     refs/heads/main; refs/tags/v* only appears when a human pushes a v* tag directly, because
+    #     a GITHUB_TOKEN tag push cannot re-trigger a workflow. Both are accepted below.
+    # So the boundary this enforces is "built and signed by this repo's build workflow via GitHub
+    # OIDC" - branch / latest / sha images satisfy it too. That is fine: the updater only ever pulls
+    # <repo>:<target-version> as named by the control plane (see main._tick), so it cannot drift onto
+    # a floating tag, and it applies the exact digest cosign attested rather than re-resolving.
+    #
     # Defaulted to this image's own publishing workflow so every deploy shape (docker run, compose,
     # k8s) verifies out of the box without spelling the regexp out in each install command; override
     # only when self-hosting the images under a different signer.
     cosign_identity: str = (
         r"^https://github\.com/assailai/docker-agent-ares/"
-        r"\.github/workflows/docker-publish\.yml@refs/tags/v.*$"
+        r"\.github/workflows/docker-build\.yml@"
+        r"refs/(heads/main|tags/v.*)$"
     )
     cosign_issuer: str = "https://token.actions.githubusercontent.com"
     # cosign key-based verification (alternative): path to a cosign public key.

@@ -199,6 +199,21 @@ Notes:
   are deterministic and promotable across environments.
 - Verification is **fail-closed** (`ARES_UPDATE_REQUIRE_SIGNATURE=true`): the updater refuses an
   image it cannot cosign-verify. Set it `false` only for local/dev, before image signing is wired.
+  To reproduce the updater's check by hand (cosign ships inside the updater image, so you do not
+  need it installed locally):
+
+  ```bash
+  docker run --rm --entrypoint cosign assailai/ares-updater:3.3.1 \
+    verify assailai/ares-agent:3.3.1 \
+    --certificate-identity-regexp '^https://github\.com/assailai/docker-agent-ares/\.github/workflows/docker-build\.yml@refs/(heads/main|tags/v.*)$' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+  If this fails while the image is genuinely published, the expected signer identity has drifted from
+  what CI signs with — the updater logs both sides of the comparison on failure.
+- The updater keeps the **agent** current; it does not update itself. Moving the updater to a new
+  version is an operator action: re-run `scripts/bootstrap.sh`, `docker compose pull && docker
+  compose up -d`, or re-apply the k8s manifest.
 - Only the updater touches the runtime (the Docker socket, or the scoped k8s RBAC); the agent has
   neither. To disable auto-update, remove the updater service/sidecar and update the image
   yourself (`docker compose pull && docker compose up -d`, or your GitOps pipeline).

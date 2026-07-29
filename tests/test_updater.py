@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import types
+from pathlib import Path
 
 import httpx
 import pytest
@@ -60,13 +62,51 @@ def test_verify_gate() -> None:
     assert verify.verify("img:1", unconfigured) is None
 
 
-def test_default_settings_ship_a_signer_identity() -> None:
+def _san(workflow: str, ref: str, repo: str = "assailai/docker-agent-ares") -> str:
+    """A GitHub Actions signer identity as Fulcio writes it into the certificate SAN."""
+    return f"https://github.com/{repo}/.github/workflows/{workflow}@{ref}"
+
+
+def test_default_signer_identity_matches_what_ci_actually_signs_with() -> None:
     # a stock updater (no env) verifies signatures out of the box: identity + issuer are baked in,
     # so the docker-run / compose / k8s install commands do not each spell the regexp out.
+    # Assert on the regexp's BEHAVIOUR, not its text: a substring check on the repo name let the
+    # default drift to a workflow file that never signs anything, and every update failed closed.
     settings = UpdaterSettings()
     assert settings.require_signature is True
-    assert "assailai/docker-agent-ares" in settings.cosign_identity
     assert settings.cosign_issuer == "https://token.actions.githubusercontent.com"
+
+    identity = re.compile(settings.cosign_identity)
+    # the release path (auto-tag.yml -> docker-build.yml) signs at the caller's ref, refs/heads/main;
+    # a hand-pushed v* tag signs at the tag ref. Both are ours.
+    assert identity.search(_san("docker-build.yml", "refs/heads/main"))
+    assert identity.search(_san("docker-build.yml", "refs/tags/v3.3.1"))
+    # not ours, or not a signer: another owner/repo, the caller workflow that holds no cosign step,
+    # and an unmerged PR build (which does not push or sign at all).
+    assert not identity.search(_san("docker-build.yml", "refs/heads/main", repo="attacker/evil"))
+    assert not identity.search(_san("docker-publish.yml", "refs/heads/main"))
+    assert not identity.search(_san("docker-build.yml", "refs/pull/30/merge"))
+    # cosign's -regexp flags are substring matches, so the anchors have to hold on both ends.
+    assert not identity.search(_san("docker-build.yml", "refs/heads/main") + ".evil.example")
+    assert not identity.search("https://evil.example/" + _san("docker-build.yml", "refs/heads/main"))
+
+
+def test_default_signer_identity_names_the_workflow_that_signs() -> None:
+    # the regexp must name the workflow file containing the `cosign sign` step, because Fulcio takes
+    # the certificate SAN from the OIDC job_workflow_ref claim - the file holding the signing job,
+    # not the entrypoint workflow that calls it. Deriving the expected file from CI (rather than
+    # hardcoding it here) is what catches the signing step moving between workflows again.
+    workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    if not workflows.is_dir():
+        pytest.skip("no .github/workflows checkout (e.g. running inside the built image)")
+    signing = sorted(p.name for p in workflows.glob("*.yml") if "cosign sign" in p.read_text())
+    assert signing, "no workflow runs `cosign sign`; the updater's identity regexp is unverifiable"
+
+    identity = re.compile(UpdaterSettings().cosign_identity)
+    for workflow in signing:
+        assert identity.search(_san(workflow, "refs/heads/main")), (
+            f"{workflow} signs images but its identity does not match the updater's regexp"
+        )
 
 
 def test_verify_pins_the_cosign_verified_digest(monkeypatch: pytest.MonkeyPatch) -> None:
