@@ -192,7 +192,7 @@ def test_open_with_an_unauthorized_name_is_refused() -> None:
     assert _decode(ws.sent[0])[:2] == (_OPEN_ERR, 11)
 
 
-def test_open_dials_the_resolved_address_not_the_name() -> None:
+def test_open_dials_the_resolved_address_not_the_name(monkeypatch: pytest.MonkeyPatch) -> None:
     # the check and the connect must land on the same destination, so the dial uses the address
     # we authorized rather than going back through the resolver.
     client, ws = _client_with_ws({"bank.internal"})
@@ -203,12 +203,8 @@ def test_open_dials_the_resolved_address_not_the_name() -> None:
         dialed.append((host, port))
         raise OSError("no listener in the test")
 
-    original = asyncio.open_connection
-    asyncio.open_connection = fake_open_connection  # type: ignore[assignment]
-    try:
-        asyncio.run(client._open(13, json.dumps({"host": "bank.internal", "port": 8000}).encode()))
-    finally:
-        asyncio.open_connection = original  # type: ignore[assignment]
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    asyncio.run(client._open(13, json.dumps({"host": "bank.internal", "port": 8000}).encode()))
     assert dialed == [("203.0.113.10", 8000)]
     assert _decode(ws.sent[0])[:2] == (_OPEN_ERR, 13)  # the dial failed, so the stream fails
 
@@ -216,9 +212,9 @@ def test_open_dials_the_resolved_address_not_the_name() -> None:
 # ── manager: the pushed set ───────────────────────────────────────────────────
 def test_manager_sync_replaces_the_pushed_host_set_in_place() -> None:
     manager = TunnelManager("ws://x", "tok", ["10.0.0.0/24"], insecure=False)
-    shared = manager._args[3]
+    shared = manager._allowed_hosts
     manager.sync(False, ["Bank.Internal.", "  ", "staging.acme.com"])
     assert shared == {"bank.internal", "staging.acme.com"}
     manager.sync(False, [])
     assert shared == set()
-    assert shared is manager._args[3]  # the live client holds this object
+    assert shared is manager._allowed_hosts  # the live client holds this same object

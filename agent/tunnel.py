@@ -58,12 +58,6 @@ def _decode(frame: bytes) -> tuple[int, int, bytes]:
     return opcode, stream_id, frame[_HEADER.size :]
 
 
-def _dedupe(values: Iterable[str]) -> list[str]:
-    """The values in first-seen order, without duplicates."""
-    seen: set[str] = set()
-    return [v for v in values if not (v in seen or seen.add(v))]
-
-
 def tunnel_url(base_url: str) -> str:
     """Derive the WebSocket tunnel URL from the control-plane base URL."""
     ws = base_url.rstrip("/")
@@ -155,7 +149,7 @@ class TunnelClient:
             )
         except (OSError, asyncio.TimeoutError) as exc:
             raise Refused(f"{host} did not resolve on this agent: {exc}") from exc
-        addresses = _dedupe(str(info[4][0]) for info in infos)
+        addresses = list(dict.fromkeys(str(info[4][0]) for info in infos))
         if not addresses:
             raise Refused(f"{host} resolved to no address on this agent")
         return addresses
@@ -261,8 +255,10 @@ class TunnelManager:
     """
 
     def __init__(self, url: str, token: str, allowed_networks: list[str], *, insecure: bool) -> None:
+        self._url = url
+        self._token = token
+        self._allowed_networks = allowed_networks
         self._allowed_hosts: set[str] = set()
-        self._args = (url, token, allowed_networks, self._allowed_hosts)
         self._insecure = insecure
         self._task: asyncio.Task[None] | None = None
 
@@ -289,7 +285,13 @@ class TunnelManager:
         backoff = _RECONNECT_BACKOFF_MIN
         while True:
             try:
-                await TunnelClient(*self._args, insecure=self._insecure).run()
+                await TunnelClient(
+                    self._url,
+                    self._token,
+                    self._allowed_networks,
+                    self._allowed_hosts,
+                    insecure=self._insecure,
+                ).run()
                 backoff = _RECONNECT_BACKOFF_MIN  # clean close; the next reconnect starts fresh
             except asyncio.CancelledError:
                 raise
