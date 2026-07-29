@@ -12,9 +12,10 @@ import pytest
 
 from agent.tunnel import (
     _DATA,
+    _HOSTS_REPORTED_MAX,
     _OPEN_ERR,
-    Refused,
     RefusalLog,
+    Refused,
     TunnelClient,
     TunnelManager,
     _decode,
@@ -249,7 +250,7 @@ def test_a_refused_host_is_explained_once_then_only_counted(
         rollup = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
 
     assert len(rollup) == 1
-    assert "49 further tunnel dial(s) to 1 already-reported host(s)" in rollup[0]
+    assert "49 further tunnel dial(s) to 1 host(s)" in rollup[0]
     assert "autofill.example.com x49" in rollup[0]
 
 
@@ -276,3 +277,24 @@ def test_open_records_the_refusal_once_per_host(caplog: pytest.LogCaptureFixture
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
     assert "not an approved target" in warnings[0].getMessage()
+
+
+def test_full_refusal_lines_are_capped_across_distinct_hosts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The page under test decides what the browser dials, so distinct refused hosts are not ours to
+    bound: one referencing a thousand third parties must not produce a thousand WARNING lines."""
+    log = RefusalLog()
+    with caplog.at_level("INFO", logger="ares.agent.tunnel"):
+        for n in range(_HOSTS_REPORTED_MAX * 2):
+            log.record(f"host{n}.example.com", f"host{n}.example.com resolves outside ...")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == _HOSTS_REPORTED_MAX  # the rest are counted, not printed
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="ares.agent.tunnel"):
+        log.flush()
+    rollup = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert len(rollup) == 1
+    assert f"to {_HOSTS_REPORTED_MAX} host(s)" in rollup[0]  # the ones over budget still accounted

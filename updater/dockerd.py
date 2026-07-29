@@ -23,16 +23,6 @@ _TIMEOUT = 300.0
 _VERIFY_CHECKS = 5
 _VERIFY_INTERVAL = 2.0
 
-# Container ``Config`` keys the *operator* owns, so they have to survive a recreate. Everything
-# else in ``Config`` (``Entrypoint``, ``Cmd``, ``Healthcheck``, ``User``, ``WorkingDir``,
-# ``Volumes``, ``ExposedPorts``, ``StopSignal``, ...) is contributed by the image, and an explicit
-# value in a create body OVERRIDES the new image's own - so copying those forward would pin an
-# updated agent to the old image's behaviour and a release that changed its entrypoint or
-# healthcheck would be silently ignored on every deployed agent. ``Env`` carries ``ARES_TOKEN`` and
-# every other ``ARES_*`` setting, so it is preserved verbatim rather than diffed against the image.
-_OPERATOR_OWNED = ("Env",)
-
-
 class DockerBackend:
     def available(self) -> bool:
         return _SOCK.exists()
@@ -115,12 +105,20 @@ def _operator_labels(docker: httpx.Client, attrs: dict) -> dict[str, str]:
 
 
 def _operator_config(docker: httpx.Client, attrs: dict) -> dict:
-    """The slice of the old container's ``Config`` that the replacement must carry over."""
-    config: dict = {
-        key: attrs["Config"][key] for key in _OPERATOR_OWNED if key in attrs["Config"]
-    }
-    labels = _operator_labels(docker, attrs)
-    if labels:  # omitted entirely when empty, so the new image's labels apply unshadowed
+    """The slice of the old container's ``Config`` the replacement must carry over.
+
+    Only what the *operator* set. Everything else in ``Config`` (``Entrypoint``, ``Cmd``,
+    ``Healthcheck``, ``User``, ``WorkingDir``, ``Volumes``, ``ExposedPorts``, ...) came from the old
+    image, and an explicit value in a create body OVERRIDES the new image's own, so carrying those
+    forward would pin an updated agent to the old image's behaviour: a release that changed its
+    entrypoint or healthcheck would be silently ignored on every deployed agent.
+
+    Each key is omitted rather than set empty, so the new image supplies it unshadowed.
+    """
+    config: dict = {}
+    if env := attrs["Config"].get("Env"):
+        config["Env"] = env  # ARES_TOKEN and every other ARES_* setting; kept verbatim
+    if labels := _operator_labels(docker, attrs):
         config["Labels"] = labels
     return config
 

@@ -49,10 +49,12 @@ _DIAL_TIMEOUT = 10.0
 _RESOLVE_TIMEOUT = 5.0
 _RECONNECT_BACKOFF_MIN = 1.0
 _RECONNECT_BACKOFF_MAX = 30.0
-# how many resolved addresses a refusal names before it summarizes the rest, and how often the
-# suppressed-repeat rollup is emitted.
-_ADDRESSES_NAMED = 3
-_ROLLUP_INTERVAL = 60.0
+_ADDRESSES_NAMED = 3  # resolved addresses a refusal names before it counts the rest
+_ROLLUP_INTERVAL = 60.0  # seconds between rollups of the repeats that were not logged in full
+# Distinct hosts explained in full before the log falls back to counting. The page under test decides
+# what the browser dials, so a page referencing a thousand third parties would otherwise still cost a
+# thousand WARNING lines.
+_HOSTS_REPORTED_MAX = 50
 
 
 def _encode(opcode: int, stream_id: int, payload: bytes = b"") -> bytes:
@@ -110,8 +112,9 @@ class RefusalLog:
     A browser driven through the tunnel re-dials its vendor's telemetry and the target page's
     third-party assets on every page load, so one assessment refuses the same handful of hosts
     hundreds of times. Logged once per dial, that buries the refusal an operator actually needs to
-    see (a dial at something they did not expect). So each host is reported in full the first time
-    and its repeats are counted into a rollup instead.
+    see (a dial at something they did not expect). So a host is reported in full the first time it is
+    refused, up to ``_HOSTS_REPORTED_MAX`` distinct hosts, and everything after that is counted into
+    a rollup instead.
     """
 
     def __init__(self) -> None:
@@ -120,23 +123,27 @@ class RefusalLog:
         self._last_rollup = time.monotonic()
 
     def record(self, host: str, reason: str) -> None:
-        if host in self._reported:
-            self._suppressed[host] += 1
-        else:
+        unseen = host not in self._reported
+        if unseen and len(self._reported) < _HOSTS_REPORTED_MAX:
             self._reported.add(host)
             logger.warning("refused tunnel target: %s", reason)
+        else:
+            self._suppressed[host] += 1
         if time.monotonic() - self._last_rollup >= _ROLLUP_INTERVAL:
             self.flush()
 
     def flush(self) -> None:
-        """Report the repeats counted since the last rollup. Called on the interval and at close, so
-        the final batch is never lost. ``_reported`` deliberately survives: a host that has already
-        been explained in full should not be explained again on the next rollup."""
+        """Report the repeats counted since the last rollup, then reset the clock.
+
+        Called on the interval and again at close, so the final batch is never lost. ``_reported``
+        deliberately survives a flush: a host already explained in full should not be explained
+        again on the next one.
+        """
         self._last_rollup = time.monotonic()
         if not self._suppressed:
             return
         logger.info(
-            "refused %d further tunnel dial(s) to %d already-reported host(s): %s",
+            "refused %d further tunnel dial(s) to %d host(s): %s",
             sum(self._suppressed.values()),
             len(self._suppressed),
             ", ".join(f"{host} x{n}" for host, n in self._suppressed.most_common()),
