@@ -145,6 +145,7 @@ dashboard**. You do not need a new registration token to upgrade.
 | Certificate validation errors | Either a TLS-inspecting proxy is in the path (see [`network-requirements.md`](network-requirements.md)), or the host clock is wrong. Check `date`. |
 | `Unable to find image ... locally` then a registry error | The image was not loaded, or the tag does not match. Re-run step 4 and check `docker images assailai/ares-agent`. |
 | Container keeps restarting | `docker logs ares-agent` will say why. The agent restarts itself deliberately if it cannot reach us for 10 minutes. |
+| It comes online, but as an agent you already had, ignoring your new token | The `ares-agent-data` volume already held an identity from a previous install, and the agent keeps its existing one rather than registering again. That is the right behaviour for a restart or an upgrade. If you actually want a **new** enrollment, remove the volume first with `docker volume rm ares-agent-data` (this discards that agent's identity, so only do it if you intend to re-register), or run the new one under a different `--name` and `-v` volume name. |
 
 Useful commands:
 
