@@ -53,6 +53,10 @@ for you.
 The options below just show the *shape* of what the dashboard hands you (each needs the
 `ARES_TOKEN` it issues), in case you want to adapt it for Compose, Kubernetes, or your own tooling.
 
+Deploying onto a firewalled host? Options A to D all pull from Docker Hub, so start with
+[docs/network-requirements.md](docs/network-requirements.md) (the full outbound allowlist), and use
+[Option E](#option-e-offline-install-no-registry-access) if the host cannot reach a registry at all.
+
 ### Option A: Docker run
 
 The dashboard's Deploy flow gives you exactly this command, filled in. Pin to a specific version
@@ -122,6 +126,19 @@ kubectl rollout status deploy/ares-agent
 To opt out of auto-update, delete the `ares-updater` container plus its ServiceAccount, Role, and
 RoleBinding, and update the image through your own pipeline instead.
 
+### Option E: Offline install (no registry access)
+
+For a host whose egress to Docker Hub is blocked. We build a single-architecture image archive, you
+copy it over and load it, and no registry is contacted:
+
+```bash
+scripts/bundle-offline.sh                       # our side: writes dist/ares-agent-<version>-<arch>.tar.gz
+gunzip -c ares-agent-<version>-amd64.tar.gz | docker load   # their side
+```
+
+Full operator instructions, including the `--network host` requirement on Linux and the manual upgrade
+path, are in [docs/offline-install.md](docs/offline-install.md).
+
 ## Configuration
 
 The agent is configured entirely through environment variables (all prefixed `ARES_`).
@@ -143,7 +160,7 @@ The agent is configured entirely through environment variables (all prefixed `AR
 
 ## Network requirements
 
-The agent only makes **outbound** connections, all to your Ares URL:
+The **agent process** only makes **outbound** connections, all to your Ares URL:
 
 | Direction | Port | Protocol | Purpose |
 |-----------|------|----------|---------|
@@ -152,6 +169,20 @@ The agent only makes **outbound** connections, all to your Ares URL:
 
 **No inbound firewall rules are required.** Locally, the agent connects to the internal hosts on
 whatever ports your hunt targets (commonly 80, 443, 8080, 8443).
+
+**Installing and updating needs more than that**, and it is not the agent doing it: your container
+engine pulls the image from Docker Hub, and `ares-updater` verifies the new image's signature against
+Sigstore before applying it. A firewall that allows only your Ares URL will pass every check here and
+still fail at the very first `docker run` with a connection reset from `registry-1.docker.io`, so give
+your firewall team the complete list up front:
+
+**[docs/network-requirements.md](docs/network-requirements.md)** is the full, customer-shareable
+allowlist: Ares, Docker Hub and its layer CDNs, GitHub, Sigstore, and the internal DNS and NTP
+requirements, with the wildcard-depth traps that catch enterprise proxies.
+
+If a host cannot reach Docker Hub at all, install from a file instead of waiting on that change:
+**[docs/offline-install.md](docs/offline-install.md)** (`docker save` on our side,
+`docker load` on theirs; build the bundle with [`scripts/bundle-offline.sh`](scripts/bundle-offline.sh)).
 
 ## Security
 
