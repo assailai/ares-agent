@@ -51,11 +51,14 @@ scp ares-agent-3.3.3-amd64.tar.gz SHA256SUMS user@your-host:~/
 On the target host:
 
 ```bash
-sha256sum -c SHA256SUMS 2>/dev/null | grep -v "No such file"
+sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-You want `OK` next to the archive you copied. Missing-file warnings for the architecture you did not
-copy are expected.
+You want `OK` next to the archive you copied, and nothing else. `--ignore-missing` skips the
+architecture you did not copy without treating it as a failure, and the command exits non-zero if the
+file you did copy does not match, so it is safe to use in a script.
+
+**Do not continue if this reports `FAILED`.** That means the archive changed in transit; copy it again.
 
 ### 4. Load the image
 
