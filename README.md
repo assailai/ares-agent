@@ -134,12 +134,15 @@ The agent is configured entirely through environment variables (all prefixed `AR
 | `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
 | `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
+| `ARES_CA_BUNDLE` | *(none)* | Extra CA roots to trust, as a PEM file or a directory of them. Rarely needed: the agent already trusts this host's CA store (see [TLS inspection](#tls-inspection-corporate-proxy)). Set it only for a root that is in neither the host store nor `/certs`. |
 
 ### Volume
 
 | Path | Description |
 |------|-------------|
 | `/data` | Persistent state. Holds `agent-state.json` (the agent id and its auth token) so the agent keeps its identity across restarts. |
+| `/host-ca` | *(optional, read-only)* This host's CA directory, mounted by the install command. Lets the agent trust whatever the host trusts. See [TLS inspection](#tls-inspection-corporate-proxy). |
+| `/certs` | *(optional, read-only)* Drop-in for extra CA roots the host store does not have, e.g. a Kubernetes ConfigMap. Every `.crt`, `.pem`, or `.cer` inside is trusted. |
 
 ## Network requirements
 
@@ -152,6 +155,46 @@ The agent only makes **outbound** connections, all to your Ares URL:
 
 **No inbound firewall rules are required.** Locally, the agent connects to the internal hosts on
 whatever ports your hunt targets (commonly 80, 443, 8080, 8443).
+
+### TLS inspection (corporate proxy)
+
+**This works out of the box; there is nothing to configure.** If your network terminates and
+re-signs outbound TLS, the install command mounts this host's CA directory into the agent
+read-only at `/host-ca`, and the agent trusts those roots alongside the public ones. Your
+inspection root is already trusted on the host (it has to be, or nothing on the machine could
+browse), so that is all it takes.
+
+Confirm it from the logs; the agent reports its trust before it connects to anything:
+
+```
+INFO ares.agent TLS trust: image store, certifi, /host-ca (1 file)
+```
+
+If it says only `image store, certifi`, the mount did not happen. Add it by hand:
+
+```bash
+# Debian, Ubuntu, Alpine, SUSE. On RHEL / Fedora / Amazon Linux use
+# /etc/pki/ca-trust/extracted/pem instead.
+-v /etc/ssl/certs:/host-ca:ro
+```
+
+Two cases need more than the host store:
+
+- **Kubernetes**, where there is no host directory to mount. Put the root in a ConfigMap and
+  mount it at `/certs` (see `deploy/k8s/ares-agent.yaml`).
+- **A root that was never installed on the host.** Mount the directory holding it at `/certs`, or
+  point `ARES_CA_BUNDLE` at the file.
+
+Mount the same thing into `ares-updater`. It runs `cosign` to verify image signatures through the
+same proxy and fails closed, so without the CAs the agent stays online but silently stops
+auto-updating.
+
+**On an agent older than 3.4.0**, which verified against a bundle inside the Python package and
+ignored the OS trust store entirely, the equivalent is two flags:
+
+```bash
+-v /etc/ssl/certs:/host-ca:ro -e SSL_CERT_FILE=/host-ca/ca-certificates.crt
+```
 
 ## Security
 
@@ -227,6 +270,7 @@ Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 | `ARES_TOKEN is required` | No token was passed. Add `-e ARES_TOKEN=...`. |
 | `Registration token rejected` | The token expired or was already used. Generate a fresh one in Settings -> Agents. |
 | `Cannot reach Ares at ...` | The host can't reach your Ares URL on 443. Check egress / proxy rules. The agent keeps retrying. |
+| `CERTIFICATE_VERIFY_FAILED ... self-signed certificate in certificate chain` | Your network is inspecting TLS and the agent does not trust the root doing it. See [TLS inspection](#tls-inspection-corporate-proxy). Check the `TLS trust:` line at startup to see what the agent did load. Installing the root *inside* the container with `update-ca-certificates` is not enough on agents older than 3.4.0, and does not survive an update on any version. |
 | `No internal LAN auto-detected` | Auto-detection found nothing scannable. Set `ARES_NETWORKS=10.0.0.0/24,...` or edit the networks in the dashboard. |
 | `Heartbeat unauthorized` | The stored agent credentials were rejected (a decommissioned agent, or stale credentials from a kept `/data` volume). After a few consecutive rejections the agent tries to re-enroll with `ARES_TOKEN`: if the token is still unused it adopts a fresh identity and recovers; if the token is spent it keeps the current credentials and retries (it does not exit or wipe anything), so a decommissioned agent idles quietly. To give such an agent a new identity, redeploy with a fresh token. |
 

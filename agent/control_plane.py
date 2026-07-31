@@ -13,6 +13,7 @@ import socket
 
 import httpx
 
+from agent import tlsconf
 from agent.config import Settings
 
 
@@ -48,9 +49,11 @@ def system_info() -> dict:
 
 
 def _client(settings: Settings) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        base_url=settings.base_url, timeout=30.0, verify=not settings.insecure
-    )
+    # An explicit context, never `verify=True`: given a bare True, httpx verifies against
+    # certifi's bundle inside site-packages and ignores the OS trust store entirely, so a root CA
+    # installed in the container the ordinary way would do nothing here. See agent.tlsconf.
+    trust = tlsconf.build_trust(insecure=settings.insecure, ca_bundle=settings.ca_bundle)
+    return httpx.AsyncClient(base_url=settings.base_url, timeout=30.0, verify=trust.context)
 
 
 def _auth(token: str) -> dict[str, str]:

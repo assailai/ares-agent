@@ -20,11 +20,11 @@
 set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
-IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.3.3}}"
+IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.4.0}}"
 # The companion updater keeps the agent on the release the dashboard marks current; it is the only
 # component that touches the Docker socket (the agent stays unprivileged). Set ARES_DISABLE_AUTOUPDATE
 # to opt out (change-control-sensitive hosts). Override the image with ARES_UPDATER_IMAGE=<full ref>.
-UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.3.3}}"
+UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.4.0}}"
 CONTAINER_NAME="ares-agent"
 UPDATER_CONTAINER_NAME="ares-updater"
 VOLUME_NAME="ares-agent-data"
@@ -115,6 +115,35 @@ replace_existing() {
     "$RUNTIME" rm -f "$name" >/dev/null 2>&1 || true
 }
 
+# Echo the `-v` flag that mounts this host's CA directory into a container, or nothing.
+#
+# A network that inspects TLS terminates every outbound connection and re-signs it with its own
+# root, which a container has no reason to trust. The host does, though: the customer's IT had to
+# make it trusted there or nothing on the machine could browse. So we hand the container the
+# host's own store and the whole problem disappears with nothing for the operator to configure.
+#
+# Mount the *directory* the bundle resolves to, not the file: `update-ca-certificates` rewrites
+# the bundle to a fresh inode, which a file mount would not follow. `readlink -f` is what covers
+# the distros, landing on /etc/ssl/certs (Debian, Ubuntu, Alpine, SUSE) or
+# /etc/pki/ca-trust/extracted/pem (RHEL, Fedora, Amazon Linux).
+#
+# Linux only. On Docker Desktop the container runs in a VM whose /etc/ssl has nothing to do with
+# the Mac or Windows trust store, and mounting a system path there needs file-sharing permission
+# we should not demand of a dev machine. Keep this list identical to the one the dashboard's
+# install command uses (apps/web/src/lib/agent-install.ts in ares-v2), so the two install paths
+# cannot diagnose the same host differently.
+ca_mount_flag() {
+    [ "$PLATFORM" = "linux" ] || return 0
+    local bundle resolved
+    for bundle in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+        [ -r "$bundle" ] || continue
+        resolved="$(readlink -f "$bundle" 2>/dev/null)" || continue
+        [ -n "$resolved" ] || continue
+        printf -- '-v\n%s:/host-ca:ro\n' "$(dirname "$resolved")"
+        return 0
+    done
+}
+
 start_container() {
     step "Starting the agent"
     replace_existing "$CONTAINER_NAME"
@@ -130,9 +159,15 @@ start_container() {
     fi
 
     local var
-    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE ARES_SCAN_SCOPE; do
+    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE ARES_SCAN_SCOPE \
+               ARES_CA_BUNDLE SSL_CERT_FILE; do
         [ -n "${!var:-}" ] && run_args+=(-e "$var=${!var}")
     done
+    # Trust whatever this host trusts, so a TLS-inspecting network needs no configuration.
+    local ca_flag
+    while IFS= read -r ca_flag; do
+        run_args+=("$ca_flag")
+    done < <(ca_mount_flag)
     # --restart=always pairs with the persistence set up in setup_persistence (linger on rootless
     # Podman; the system daemon on Docker), so the agent comes back after logout and reboot.
     run_args+=(-v "${VOLUME_NAME}:/data" --restart=always)
@@ -156,11 +191,19 @@ start_updater() {
     # ENGINE_SOCK is the Docker socket, or the rootless Podman one when setup_persistence set it up.
     # Non-fatal: if it cannot start (e.g. no socket access), the agent still runs, just without
     # auto-update.
-    if "$RUNTIME" run -d --name "$UPDATER_CONTAINER_NAME" \
-        -e "ARES_UPDATE_CONTAINER=$CONTAINER_NAME" \
-        -v "${VOLUME_NAME}:/data:ro" \
-        -v "${ENGINE_SOCK}:/var/run/docker.sock" \
-        --restart=always "$UPDATER_IMAGE" >/dev/null 2>&1; then
+    # The updater needs the host CAs too: cosign has to reach the registry and the Sigstore log
+    # through the same inspecting proxy, and it fails closed when it cannot verify a signature.
+    local updater_args=(-d --name "$UPDATER_CONTAINER_NAME")
+    updater_args+=(-e "ARES_UPDATE_CONTAINER=$CONTAINER_NAME")
+    updater_args+=(-v "${VOLUME_NAME}:/data:ro")
+    updater_args+=(-v "${ENGINE_SOCK}:/var/run/docker.sock")
+    local ca_flag
+    while IFS= read -r ca_flag; do
+        updater_args+=("$ca_flag")
+    done < <(ca_mount_flag)
+    updater_args+=(--restart=always)
+
+    if "$RUNTIME" run "${updater_args[@]}" "$UPDATER_IMAGE" >/dev/null 2>&1; then
         info "Auto-update companion started."
     else
         warn "Could not start the ares-updater companion; the agent will run but will not auto-update."

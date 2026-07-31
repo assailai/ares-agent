@@ -44,7 +44,7 @@ def _client(
         "tok",
         networks if networks is not None else ["10.0.0.0/24", "192.168.1.0/24"],
         allowed_hosts if allowed_hosts is not None else set(),
-        insecure=False,
+        ssl_context=None,
     )
 
 
@@ -214,7 +214,7 @@ def test_open_dials_the_resolved_address_not_the_name(monkeypatch: pytest.Monkey
 
 # ── manager: the pushed set ───────────────────────────────────────────────────
 def test_manager_sync_replaces_the_pushed_host_set_in_place() -> None:
-    manager = TunnelManager("ws://x", "tok", ["10.0.0.0/24"], insecure=False)
+    manager = TunnelManager("ws://x", "tok", ["10.0.0.0/24"], ssl_context=None)
     shared = manager._allowed_hosts
     manager.sync(False, ["Bank.Internal.", "  ", "staging.acme.com"])
     assert shared == {"bank.internal", "staging.acme.com"}

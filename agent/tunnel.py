@@ -166,11 +166,11 @@ class TunnelClient:
         allowed_networks: list[str],
         allowed_hosts: set[str],
         *,
-        insecure: bool,
+        ssl_context: ssl.SSLContext | None,
     ) -> None:
         self._url = url
         self._token = token
-        self._insecure = insecure
+        self._ssl_context = ssl_context
         self._allowed = [ipaddress.ip_network(n, strict=False) for n in allowed_networks]
         self._allowed_hosts = allowed_hosts
         self._writers: dict[int, asyncio.StreamWriter] = {}
@@ -222,12 +222,10 @@ class TunnelClient:
         return addresses
 
     async def run(self) -> None:
-        ssl_context: ssl.SSLContext | None = None
-        if self._url.startswith("wss://"):
-            ssl_context = ssl.create_default_context()
-            if self._insecure:
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
+        # The same context the control plane verifies with (agent.tlsconf), so the two halves of
+        # the agent can never disagree about which CAs are trusted. A plain ws:// URL has no TLS
+        # to configure.
+        ssl_context = self._ssl_context if self._url.startswith("wss://") else None
         async with websockets.connect(
             self._url,
             additional_headers={"Authorization": f"Bearer {self._token}"},
@@ -322,12 +320,19 @@ class TunnelManager:
     the live client sees the current one without reconnecting.
     """
 
-    def __init__(self, url: str, token: str, allowed_networks: list[str], *, insecure: bool) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        allowed_networks: list[str],
+        *,
+        ssl_context: ssl.SSLContext | None,
+    ) -> None:
         self._url = url
         self._token = token
         self._allowed_networks = allowed_networks
         self._allowed_hosts: set[str] = set()
-        self._insecure = insecure
+        self._ssl_context = ssl_context
         self._task: asyncio.Task[None] | None = None
 
     def sync(self, required: bool, allowed_hosts: Iterable[str] = ()) -> None:
@@ -358,7 +363,7 @@ class TunnelManager:
                     self._token,
                     self._allowed_networks,
                     self._allowed_hosts,
-                    insecure=self._insecure,
+                    ssl_context=self._ssl_context,
                 ).run()
                 backoff = _RECONNECT_BACKOFF_MIN  # clean close; the next reconnect starts fresh
             except asyncio.CancelledError:

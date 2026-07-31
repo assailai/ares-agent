@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agent import control_plane, netdetect, scan
+from agent import control_plane, netdetect, scan, tlsconf
 from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.state import AgentState, load_state, save_state
@@ -132,12 +132,19 @@ async def _register(state: AgentState, networks: list[str]) -> AgentState:
     return state
 
 
+def _tls_hint(exc: BaseException) -> str:
+    """The remedy for a rejected certificate, or "" for any other failure."""
+    return tlsconf.verification_hint(
+        exc, insecure=settings.insecure, ca_bundle=settings.ca_bundle
+    )
+
+
 def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
     """Surface sustained trouble without spamming the log: the first failure and every
     tenth after it are WARNING (visible at the default INFO level); the rest stay DEBUG.
     The caller logs the matching recovery once the call succeeds again."""
     if failures == 1 or failures % 10 == 0:
-        logger.warning("%s failing (attempt %d): %s", what, failures, exc)
+        logger.warning("%s failing (attempt %d): %s%s", what, failures, exc, _tls_hint(exc))
     else:
         logger.debug("%s failed (attempt %d): %s", what, failures, exc)
 
@@ -387,9 +394,10 @@ async def _enroll(networks: list[str]) -> AgentState | None:
             return None
         except (httpx.HTTPError, OSError) as exc:
             logger.error(
-                "Cannot reach Ares at %s: %s. Retrying in %ds.",
+                "Cannot reach Ares at %s: %s.%s Retrying in %ds.",
                 settings.base_url,
                 exc,
+                _tls_hint(exc),
                 _REGISTER_RETRY_SECONDS,
             )
             await asyncio.sleep(_REGISTER_RETRY_SECONDS)
@@ -464,6 +472,11 @@ async def run() -> int:
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     _resolve_scan_limits()
+    # Say which CAs we trust *before* anything can fail on one, so `docker logs` answers "did it
+    # see my corporate root?" up front rather than leaving an operator to infer it from a
+    # verification error.
+    trust = tlsconf.build_trust(insecure=settings.insecure, ca_bundle=settings.ca_bundle)
+    logger.info("TLS trust: %s", trust.summary())
     networks = settings.network_overrides() or netdetect.scan_targets(settings.scan_scope)
     if not networks:
         logger.warning(
@@ -488,7 +501,7 @@ async def run() -> int:
             tunnel_url(settings.base_url),
             state.agent_token or "",
             networks,
-            insecure=settings.insecure,
+            ssl_context=trust.context,
         )
         try:
             await _serve(state, tunnel)

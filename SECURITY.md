@@ -71,9 +71,12 @@ The Ares Agent implements multiple layers of security:
 - Master encryption key stored separately from database with 0600 permissions
 
 ### Network Security
-- TLS 1.2+ for all connections
-- WireGuard VPN with ChaCha20-Poly1305 encryption
-- No inbound ports required
+- TLS 1.2+ for all connections, verified against the union of the image's CA store, certifi's
+  public roots, and any CA the operator mounts
+- Outbound-only: the control plane is HTTPS and the data plane is an outbound WebSocket the agent
+  opens only while a hunt runs. No inbound ports are required.
+- The host CA mount (`/host-ca`) is read-only and covers the public certificate directory only;
+  `/etc/ssl/private` is never mounted, so no host private key is exposed to the container
 
 ### Dependencies
 - All dependencies pinned to specific versions

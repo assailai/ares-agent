@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from updater import verify
+from updater import tlsconf, verify
 from updater.backend import Backend
 from updater.config import repo_of, settings, tag_of
 from updater.dockerd import DockerBackend
@@ -81,6 +81,9 @@ def _tick(backend: Backend) -> None:
 
 def main() -> None:
     _configure_logging()
+    # Before anything reaches out: cosign is a subprocess, so SSL_CERT_FILE is the only way to
+    # hand it the host's CAs on a network that inspects TLS.
+    tlsconf.install_ca_bundle()
     backend = _pick_backend()
     if backend is None:
         logger.error(
