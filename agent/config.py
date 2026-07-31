@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     agent_name: str = ""
     # Skip TLS verification. LOCAL DEV ONLY (e.g. plain http or a self-signed ares-v2).
     insecure: bool = False
+    # Extra CA roots to trust, as a PEM file or a directory of them. The escape hatch, not the
+    # normal path: the agent already trusts everything in the host CA store the install command
+    # mounts at /host-ca, plus anything dropped in /certs. Set this only for a root that is in
+    # neither, such as an internal CA on a build that never had it installed on the host.
+    ca_bundle: str = ""
 
     # how broadly to scan when ARES_NETWORKS is unset: "supernet16" (default; each attached
     # subnet widened to its enclosing /16), "attached" (interface prefixes only), "rfc1918" (all

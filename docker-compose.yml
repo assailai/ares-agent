@@ -15,11 +15,17 @@
 
 services:
   ares-agent:
-    image: assailai/ares-agent:3.3.3  # pin to a version (see Settings -> Agents); avoid :latest
+    image: assailai/ares-agent:3.4.0  # pin to a version (see Settings -> Agents); avoid :latest
     container_name: ares-agent
     hostname: ares-agent
     volumes:
       - ares-agent-data:/data
+      # This host's CA store, read-only. On a network that inspects TLS, the inspection root is
+      # already trusted here (it has to be, or nothing on the machine could browse), so handing it
+      # over is all the agent needs. On a network that does not, this is an ordinary public bundle
+      # and a no-op. Public certificates only: /etc/ssl/private is never mounted. On RHEL and
+      # Fedora use /etc/pki/ca-trust/extracted/pem instead.
+      - /etc/ssl/certs:/host-ca:ro
     # Headroom for the concurrent-connect scanner (still non-root, no added capabilities).
     ulimits:
       nofile:
@@ -40,11 +46,12 @@ services:
     restart: unless-stopped
 
   ares-updater:
-    image: assailai/ares-updater:3.3.3
+    image: assailai/ares-updater:3.4.0
     container_name: ares-updater
     volumes:
       - ares-agent-data:/data:ro                  # reads the agent's update-target.json
       - /var/run/docker.sock:/var/run/docker.sock  # recreates the agent on a new version
+      - /etc/ssl/certs:/host-ca:ro                 # cosign needs the host CAs through an inspecting proxy
     environment:
       # Fail-closed: verify the image's cosign signature before applying (CI signs published images
       # keyless via OIDC). The expected signer identity + issuer are baked into the updater image;

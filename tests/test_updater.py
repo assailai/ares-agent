@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import types
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from updater import dockerd, kube, main, verify
+from updater import dockerd, kube, main, tlsconf, verify
 from updater.config import UpdaterSettings, repo_of, tag_of
 from updater.dockerd import DockerBackend
 from updater.kube import K8sBackend
@@ -200,7 +201,10 @@ _OLD_CONTAINER = {
         "User": "10001",
         "WorkingDir": "/old-app",
     },
-    "HostConfig": {"Binds": ["ares-agent-data:/data"], "RestartPolicy": {"Name": "always"}},
+    "HostConfig": {
+        "Binds": ["ares-agent-data:/data", "/etc/ssl/certs:/host-ca:ro"],
+        "RestartPolicy": {"Name": "always"},
+    },
     "State": {"Running": True},
 }
 
@@ -229,6 +233,11 @@ def test_docker_apply_carries_only_the_operator_owned_config(
     # what the operator owns survives: env (ARES_TOKEN et al) and the whole HostConfig.
     assert body["Env"] == ["ARES_TOKEN=t", "PATH=/usr/bin"]
     assert body["HostConfig"] == _OLD_CONTAINER["HostConfig"]
+    # the host CA mount specifically. This is why the fix is a mount rather than a `docker cp`
+    # into the container: a copied-in root CA lives in the writable layer, which the recreate
+    # throws away, so an auto-update would silently break TLS again on a customer's inspecting
+    # network. A bind is HostConfig, and HostConfig is carried over whole.
+    assert "/etc/ssl/certs:/host-ca:ro" in body["HostConfig"]["Binds"]
     assert body["Image"] == "assailai/ares-agent:3.3.3"
     # everything the image owns is left to the new image rather than pinned to the old one.
     for key in ("Entrypoint", "Cmd", "Healthcheck", "User", "WorkingDir"):
@@ -318,3 +327,108 @@ def test_tick_applies_the_verified_digest_then_noops(monkeypatch: pytest.MonkeyP
     backend.running, backend.applied = pinned, None  # agent now runs the pinned digest
     main._tick(backend)
     assert backend.applied is None  # cache hit -> no re-apply
+
+
+# --- CA trust: cosign is a subprocess, so SSL_CERT_FILE is the only lever that reaches it -------
+
+
+def _prepare_ca_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    host_ca, extra = tmp_path / "host-ca", tmp_path / "certs"
+    image_bundle = tmp_path / "image-bundle.crt"
+    image_bundle.write_text("PUBLIC ROOTS\n")
+    monkeypatch.setattr(tlsconf, "HOST_CA_DIR", host_ca)
+    monkeypatch.setattr(tlsconf, "EXTRA_CA_DIR", extra)
+    monkeypatch.setattr(tlsconf, "IMAGE_BUNDLE", image_bundle)
+    monkeypatch.setattr(tlsconf, "MERGED_BUNDLE", tmp_path / "merged.pem")
+    # install_ca_bundle writes straight to os.environ (that is the point: children inherit it), so
+    # register the variable with monkeypatch first or whatever it sets leaks into later tests.
+    # setenv records the pre-test state; the delenv leaves the code seeing it as unset.
+    monkeypatch.setenv("SSL_CERT_FILE", "")
+    monkeypatch.delenv("SSL_CERT_FILE")
+    return host_ca, extra
+
+
+def test_no_mounted_cas_leaves_ssl_cert_file_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the common case: nothing mounted, so the image's own store is already the whole truth and
+    # we must not narrow it by pointing SSL_CERT_FILE at a bundle of our own.
+    _prepare_ca_dirs(tmp_path, monkeypatch)
+
+    assert tlsconf.install_ca_bundle() is None
+    assert "SSL_CERT_FILE" not in os.environ
+
+
+def test_mounted_cas_are_merged_with_the_image_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # union, never replacement: dropping the public roots would break the registry pull itself.
+    host_ca, extra = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    (host_ca / "corp-root.crt").write_text("CORP ROOT\n")
+    extra.mkdir()
+    (extra / "internal.pem").write_text("INTERNAL ROOT\n")
+
+    bundle = tlsconf.install_ca_bundle()
+
+    assert bundle is not None
+    body = bundle.read_text()
+    assert "PUBLIC ROOTS" in body and "CORP ROOT" in body and "INTERNAL ROOT" in body
+    # cosign is a Go binary we shell out to; it reads this variable and nothing else we control.
+    assert os.environ["SSL_CERT_FILE"] == str(bundle)
+
+
+def test_dangling_symlinks_are_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a mounted /etc/ssl/certs is mostly symlinks into a directory that was not mounted.
+    host_ca, _ = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    (host_ca / "dangling.pem").symlink_to("/usr/share/ca-certificates/nowhere.crt")
+
+    assert tlsconf.install_ca_bundle() is None
+    assert "SSL_CERT_FILE" not in os.environ
+
+
+def test_an_operator_set_ssl_cert_file_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # someone who pointed it somewhere deliberately gets to keep their answer.
+    host_ca, _ = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    (host_ca / "corp-root.crt").write_text("CORP ROOT\n")
+    monkeypatch.setenv("SSL_CERT_FILE", "/operators/own.pem")
+
+    assert tlsconf.install_ca_bundle() is None
+    assert os.environ["SSL_CERT_FILE"] == "/operators/own.pem"
+
+
+def test_an_unreadable_image_bundle_leaves_the_default_trust_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SSL_CERT_FILE *replaces* the default trust, so writing a bundle of only the mounted roots
+    # would narrow the updater to the corporate CA and break public TLS. Fail toward the image's
+    # own store instead.
+    host_ca, _ = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    (host_ca / "corp-root.crt").write_text("CORP ROOT\n")
+    monkeypatch.setattr(tlsconf, "IMAGE_BUNDLE", tmp_path / "does-not-exist.crt")
+
+    assert tlsconf.install_ca_bundle() is None
+    assert "SSL_CERT_FILE" not in os.environ
+
+
+def test_unreadable_mounted_files_leave_the_default_trust_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing mounted actually loaded, so there is nothing to add and no reason to point
+    # SSL_CERT_FILE at a copy of what the image already trusts.
+    host_ca, _ = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    unreadable = host_ca / "corp-root.crt"
+    unreadable.write_text("CORP ROOT\n")
+    unreadable.chmod(0o000)
+
+    try:
+        assert tlsconf.install_ca_bundle() is None
+        assert "SSL_CERT_FILE" not in os.environ
+    finally:
+        unreadable.chmod(0o644)

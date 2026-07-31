@@ -89,7 +89,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ares-agent          # the patched container; ARES_UPDATE_CONTAINER matches this
-          image: assailai/ares-agent:3.3.3   # pinned; the updater rolls this forward
+          image: assailai/ares-agent:3.4.0   # pinned; the updater rolls this forward
           envFrom:
             - secretRef:
                 name: ares-agent
@@ -101,6 +101,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            # On a cluster behind a TLS-inspecting proxy, put the inspection root CA in a
+            # ConfigMap and mount it here; the agent loads every PEM it finds and trusts them
+            # alongside the public roots. There is no host CA directory to mount on a node, so
+            # this is the Kubernetes equivalent of the /host-ca mount the docker run uses.
+            # - name: ca-certs
+            #   mountPath: /certs
+            #   readOnly: true
           resources:
             requests: { memory: "128Mi", cpu: "50m" }
             limits: { memory: "512Mi", cpu: "500m" }
@@ -119,7 +126,7 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
         - name: ares-updater         # companion; keeps ares-agent on the marked version
-          image: assailai/ares-updater:3.3.3
+          image: assailai/ares-updater:3.4.0
           env:
             - name: ARES_UPDATE_CONTAINER
               value: "ares-agent"
@@ -132,6 +139,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data        # reads the agent's update-target.json
+            # cosign reaches the registry and the Sigstore log through the same proxy and fails
+            # closed when it cannot verify, so the updater needs the same CAs as the agent.
+            # - name: ca-certs
+            #   mountPath: /certs
+            #   readOnly: true
           resources:
             requests: { memory: "64Mi", cpu: "20m" }
             limits: { memory: "128Mi", cpu: "100m" }
@@ -139,3 +151,8 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: ares-agent-data
+        # Pair with the /certs mounts above:
+        #   kubectl create configmap ares-ca-certs --from-file=corp-root.crt=/path/to/root.crt
+        # - name: ca-certs
+        #   configMap:
+        #       name: ares-ca-certs

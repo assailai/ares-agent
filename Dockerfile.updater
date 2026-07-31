@@ -17,13 +17,18 @@ LABEL org.opencontainers.image.vendor="Assail AI"
 # naming, so one Dockerfile builds for both architectures.
 ARG TARGETARCH
 ARG COSIGN_VERSION=v2.4.1
-RUN apk add --no-cache curl \
+RUN apk add --no-cache curl ca-certificates \
     && curl -fsSL -o /usr/local/bin/cosign \
        https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${TARGETARCH} \
     && chmod +x /usr/local/bin/cosign \
     && apk del curl \
     && pip install --no-cache-dir httpx pydantic-settings \
     && rm -rf /var/cache/apk/*
+
+# Same CA mount points as the agent image: the host's store at /host-ca, the manual drop-in at
+# /certs. updater.tlsconf merges whatever it finds here into one bundle and exports SSL_CERT_FILE,
+# which is what lets the cosign subprocess verify signatures through a TLS-inspecting proxy.
+RUN mkdir -p /host-ca /certs && chmod 555 /host-ca /certs
 
 WORKDIR /app
 COPY updater/ ./updater/

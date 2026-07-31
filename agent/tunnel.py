@@ -49,6 +49,9 @@ _DIAL_TIMEOUT = 10.0
 _RESOLVE_TIMEOUT = 5.0
 _RECONNECT_BACKOFF_MIN = 1.0
 _RECONNECT_BACKOFF_MAX = 30.0
+# Startup rehearsal of the data plane (see probe). Bounded so a network that blackholes the
+# upgrade costs one slow startup rather than hanging the agent before it comes online.
+_PROBE_TIMEOUT = 15.0
 _ADDRESSES_NAMED = 3  # resolved addresses a refusal names before it counts the rest
 _ROLLUP_INTERVAL = 60.0  # seconds between rollups of the repeats that were not logged in full
 # Distinct hosts explained in full before the log falls back to counting. The page under test decides
@@ -74,6 +77,62 @@ def tunnel_url(base_url: str) -> str:
     elif ws.startswith("http://"):
         ws = "ws://" + ws[len("http://") :]
     return f"{ws}/api/v1/agent/tunnel"
+
+
+async def probe(url: str, token: str, *, ssl_context: ssl.SSLContext | None) -> None:
+    """Open the tunnel, prove the upgrade works, and close it again. Raises if it does not.
+
+    The data plane is only opened while a hunt is running, so without this an operator does not
+    find out that their network blocks the WebSocket upgrade until the first real assessment,
+    which is the worst possible moment. ares authenticates the upgrade on the agent token alone
+    and does not require a running hunt, so this is a true rehearsal of the real thing.
+
+    It is a real tunnel while it lasts, so ares briefly lists this agent as reachable. That window
+    is the length of one handshake and it opens before the serve loop starts, i.e. before this
+    agent would ever have carried a hunt, so nothing can be routed into it and lost. Sending no
+    frames keeps it unambiguous: ares sees a connect and a clean close, never a stream.
+    """
+    context = ssl_context if url.startswith("wss://") else None
+    async with websockets.connect(
+        url,
+        additional_headers={"Authorization": f"Bearer {token}"},
+        ssl=context,
+        open_timeout=_PROBE_TIMEOUT,
+        close_timeout=_PROBE_TIMEOUT,
+    ):
+        pass  # the upgrade completing is the whole result
+
+
+def explain_probe_failure(exc: BaseException) -> str:
+    """What to actually do about a failed probe, or "" when we have nothing specific to add.
+
+    An HTTP status where a 101 belongs is the signature worth naming: it means something spoke
+    HTTP back to us, so we reached a server and it declined to upgrade. On a network that
+    inspects TLS that is usually the proxy rather than ares.
+    """
+    if isinstance(exc, websockets.exceptions.InvalidStatus):
+        status = exc.response.status_code
+        if status in (401, 403):
+            # Genuinely ambiguous: ares answers 403 when it rejects the token (Starlette turns a
+            # close-before-accept into one), and a proxy refusing an upgrade usually answers 403
+            # too. Rather than guess, hand over the discriminator.
+            return (
+                " Either ares rejected the agent token on the upgrade, or something in the path "
+                "refused it. The control-plane line above tells you which: if that succeeded, "
+                "the same token is good, so the upgrade is being blocked or its Authorization "
+                "header stripped, most likely by a proxy."
+            )
+        return (
+            f" Something answered with HTTP {status} where a 101 upgrade belongs, so the "
+            "WebSocket was refused rather than the connection blocked. A proxy that inspects "
+            "TLS often needs WebSocket upgrades allowed explicitly for this host."
+        )
+    if isinstance(exc, TimeoutError):
+        return (
+            " The upgrade timed out. Traffic reached the network but nothing completed the "
+            "handshake, which is what a proxy silently dropping WebSocket upgrades looks like."
+        )
+    return ""
 
 
 def normalize_host(host: str) -> str:
@@ -166,11 +225,11 @@ class TunnelClient:
         allowed_networks: list[str],
         allowed_hosts: set[str],
         *,
-        insecure: bool,
+        ssl_context: ssl.SSLContext | None,
     ) -> None:
         self._url = url
         self._token = token
-        self._insecure = insecure
+        self._ssl_context = ssl_context
         self._allowed = [ipaddress.ip_network(n, strict=False) for n in allowed_networks]
         self._allowed_hosts = allowed_hosts
         self._writers: dict[int, asyncio.StreamWriter] = {}
@@ -222,12 +281,10 @@ class TunnelClient:
         return addresses
 
     async def run(self) -> None:
-        ssl_context: ssl.SSLContext | None = None
-        if self._url.startswith("wss://"):
-            ssl_context = ssl.create_default_context()
-            if self._insecure:
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
+        # The same context the control plane verifies with (agent.tlsconf), so the two halves of
+        # the agent can never disagree about which CAs are trusted. A plain ws:// URL has no TLS
+        # to configure.
+        ssl_context = self._ssl_context if self._url.startswith("wss://") else None
         async with websockets.connect(
             self._url,
             additional_headers={"Authorization": f"Bearer {self._token}"},
@@ -322,12 +379,19 @@ class TunnelManager:
     the live client sees the current one without reconnecting.
     """
 
-    def __init__(self, url: str, token: str, allowed_networks: list[str], *, insecure: bool) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        allowed_networks: list[str],
+        *,
+        ssl_context: ssl.SSLContext | None,
+    ) -> None:
         self._url = url
         self._token = token
         self._allowed_networks = allowed_networks
         self._allowed_hosts: set[str] = set()
-        self._insecure = insecure
+        self._ssl_context = ssl_context
         self._task: asyncio.Task[None] | None = None
 
     def sync(self, required: bool, allowed_hosts: Iterable[str] = ()) -> None:
@@ -358,7 +422,7 @@ class TunnelManager:
                     self._token,
                     self._allowed_networks,
                     self._allowed_hosts,
-                    insecure=self._insecure,
+                    ssl_context=self._ssl_context,
                 ).run()
                 backoff = _RECONNECT_BACKOFF_MIN  # clean close; the next reconnect starts fresh
             except asyncio.CancelledError:

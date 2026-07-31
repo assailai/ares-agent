@@ -33,8 +33,9 @@ LABEL org.opencontainers.image.source="https://github.com/assailai/ares-agent"
 LABEL org.opencontainers.image.vendor="Assail AI"
 
 # iproute2 gives a full `ip` for LAN auto-detection (busybox's is too limited);
-# dash is a small shell for the entrypoint.
-RUN apk add --no-cache iproute2 dash openssl \
+# dash is a small shell for the entrypoint; ca-certificates is named explicitly rather than
+# inherited from the base image, because agent.tlsconf builds on the store it provides.
+RUN apk add --no-cache iproute2 dash openssl ca-certificates \
     && rm -rf /var/cache/apk/* \
     && find /usr -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
@@ -44,7 +45,12 @@ RUN pip install --no-cache-dir --no-compile /wheels/*.whl && rm -rf /wheels
 ARG UID=10001
 ARG GID=10001
 RUN addgroup -g ${GID} ares && adduser -u ${UID} -G ares -h /app -s /sbin/nologin -D ares \
-    && mkdir -p /data && chown -R ares:ares /data && chmod 700 /data
+    && mkdir -p /data && chown -R ares:ares /data && chmod 700 /data \
+    # Mount points for CA trust, empty in the image. /host-ca is where the install command mounts
+    # the host's own CA directory read-only, so a network that inspects TLS needs no config;
+    # /certs is the manual drop-in for a root the host store does not have. Both are optional:
+    # agent.tlsconf skips a directory that is not mounted. Read-only in use, hence 0555.
+    && mkdir -p /host-ca /certs && chmod 555 /host-ca /certs
 
 WORKDIR /app
 COPY --chown=ares:ares agent/ ./agent/
