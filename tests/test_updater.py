@@ -399,3 +399,36 @@ def test_an_operator_set_ssl_cert_file_wins(
 
     assert tlsconf.install_ca_bundle() is None
     assert os.environ["SSL_CERT_FILE"] == "/operators/own.pem"
+
+
+def test_an_unreadable_image_bundle_leaves_the_default_trust_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SSL_CERT_FILE *replaces* the default trust, so writing a bundle of only the mounted roots
+    # would narrow the updater to the corporate CA and break public TLS. Fail toward the image's
+    # own store instead.
+    host_ca, _ = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    (host_ca / "corp-root.crt").write_text("CORP ROOT\n")
+    monkeypatch.setattr(tlsconf, "IMAGE_BUNDLE", tmp_path / "does-not-exist.crt")
+
+    assert tlsconf.install_ca_bundle() is None
+    assert "SSL_CERT_FILE" not in os.environ
+
+
+def test_unreadable_mounted_files_leave_the_default_trust_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing mounted actually loaded, so there is nothing to add and no reason to point
+    # SSL_CERT_FILE at a copy of what the image already trusts.
+    host_ca, _ = _prepare_ca_dirs(tmp_path, monkeypatch)
+    host_ca.mkdir()
+    unreadable = host_ca / "corp-root.crt"
+    unreadable.write_text("CORP ROOT\n")
+    unreadable.chmod(0o000)
+
+    try:
+        assert tlsconf.install_ca_bundle() is None
+        assert "SSL_CERT_FILE" not in os.environ
+    finally:
+        unreadable.chmod(0o644)

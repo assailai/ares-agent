@@ -61,8 +61,22 @@ def install_ca_bundle() -> Path | None:
     if not mounted:
         return None
 
-    chunks: list[str] = []
-    for source in [IMAGE_BUNDLE, *mounted]:
+    # The image's public roots have to come first and have to be there. SSL_CERT_FILE *replaces*
+    # the default trust rather than adding to it, so a bundle holding only the mounted roots would
+    # quietly narrow the updater to the corporate CA and break public TLS. If the base is
+    # unreadable, leave SSL_CERT_FILE unset: the image's own store is a worse answer than the
+    # union, but a far better one than a partial replacement.
+    try:
+        chunks = [IMAGE_BUNDLE.read_text(encoding="utf-8", errors="ignore")]
+    except OSError as exc:
+        logger.warning(
+            "Cannot read %s (%s); leaving the default trust in place rather than narrowing it.",
+            IMAGE_BUNDLE,
+            exc,
+        )
+        return None
+
+    for source in mounted:
         try:
             # errors="ignore" because a DER-encoded .cer among the PEMs would otherwise raise and
             # cost us the whole bundle. OpenSSL skips anything outside the BEGIN/END markers, so
@@ -70,8 +84,8 @@ def install_ca_bundle() -> Path | None:
             chunks.append(source.read_text(encoding="utf-8", errors="ignore"))
         except OSError as exc:
             logger.warning("Ignoring CA file %s: %s", source, exc)
-    if not chunks:
-        return None
+    if len(chunks) == 1:
+        return None  # every mounted file failed to read; the image store already covers us
 
     try:
         MERGED_BUNDLE.write_text("\n".join(chunks), encoding="utf-8")
