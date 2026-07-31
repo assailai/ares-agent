@@ -390,6 +390,7 @@ async def test_the_probe_sends_no_ssl_context_for_a_plaintext_url(
         lambda url, **kwargs: (seen.update(kwargs), _Connection())[1],
     )
 
-    await probe("ws://localhost:8080/api/v1/agent/tunnel", "tok", ssl_context=ssl.create_default_context())
+    url = "ws://localhost:8080/api/v1/agent/tunnel"
+    await probe(url, "tok", ssl_context=ssl.create_default_context())
 
     assert seen["ssl"] is None

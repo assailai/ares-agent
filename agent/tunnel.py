@@ -86,6 +86,11 @@ async def probe(url: str, token: str, *, ssl_context: ssl.SSLContext | None) -> 
     find out that their network blocks the WebSocket upgrade until the first real assessment,
     which is the worst possible moment. ares authenticates the upgrade on the agent token alone
     and does not require a running hunt, so this is a true rehearsal of the real thing.
+
+    It is a real tunnel while it lasts, so ares briefly lists this agent as reachable. That window
+    is the length of one handshake and it opens before the serve loop starts, i.e. before this
+    agent would ever have carried a hunt, so nothing can be routed into it and lost. Sending no
+    frames keeps it unambiguous: ares sees a connect and a clean close, never a stream.
     """
     context = ssl_context if url.startswith("wss://") else None
     async with websockets.connect(

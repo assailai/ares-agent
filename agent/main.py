@@ -25,8 +25,12 @@ from agent import control_plane, netdetect, scan, tlsconf
 from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.state import AgentState, load_state, save_state
-from agent.tunnel import TunnelManager, explain_probe_failure, tunnel_url
-from agent.tunnel import probe as tunnel_probe
+from agent.tunnel import (
+    TunnelManager,
+    explain_probe_failure,
+    tunnel_url,
+)
+from agent.tunnel import probe as tunnel_probe  # aliased: bare "probe" says too little here
 
 logger = logging.getLogger("ares.agent")
 
