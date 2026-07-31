@@ -164,11 +164,20 @@ read-only at `/host-ca`, and the agent trusts those roots alongside the public o
 inspection root is already trusted on the host (it has to be, or nothing on the machine could
 browse), so that is all it takes.
 
-Confirm it from the logs; the agent reports its trust before it connects to anything:
+Confirm it from the logs. The agent reports its trust before it connects to anything, then
+rehearses both planes at startup so you find out at enrollment rather than mid-assessment:
 
 ```
 INFO ares.agent TLS trust: image store, certifi, /host-ca (1 file)
+INFO ares.agent Preflight: control plane OK (https://api.assailai.com)
+INFO ares.agent Preflight: data-plane tunnel OK (wss://api.assailai.com/api/v1/agent/tunnel)
 ```
+
+Both lines matter. Hunts that reach into your network run over the tunnel, and a proxy that
+allows our HTTPS while refusing WebSocket upgrades leaves an agent that looks perfectly healthy
+until the first assessment. If the second line reads `FAILED`, it names the likely cause; a
+blocked upgrade usually means the proxy needs WebSocket allowed explicitly for this host. The
+agent stays up either way.
 
 If it says only `image store, certifi`, the mount did not happen. Add it by hand:
 
@@ -283,6 +292,7 @@ Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 | `Registration token rejected` | The token expired or was already used. Generate a fresh one in Settings -> Agents. |
 | `Cannot reach Ares at ...` | The host can't reach your Ares URL on 443. Check egress / proxy rules. The agent keeps retrying. |
 | `CERTIFICATE_VERIFY_FAILED ... self-signed certificate in certificate chain` | Your network is inspecting TLS and the agent does not trust the root doing it. See [TLS inspection](#tls-inspection-corporate-proxy). Check the `TLS trust:` line at startup to see what the agent did load. Installing the root *inside* the container with `update-ca-certificates` is not enough on agents older than 3.4.0, and does not survive an update on any version. |
+| `Preflight: data-plane tunnel FAILED` | The agent can reach Ares but not open the tunnel that hunts run over, so it is online but cannot assess your internal network. The message names the likely cause. An HTTP status where a `101` belongs means something refused the upgrade rather than blocking the connection: allow WebSocket upgrades to your Ares host. The agent keeps running and retries when a hunt starts. |
 | `No internal LAN auto-detected` | Auto-detection found nothing scannable. Set `ARES_NETWORKS=10.0.0.0/24,...` or edit the networks in the dashboard. |
 | `Heartbeat unauthorized` | The stored agent credentials were rejected (a decommissioned agent, or stale credentials from a kept `/data` volume). After a few consecutive rejections the agent tries to re-enroll with `ARES_TOKEN`: if the token is still unused it adopts a fresh identity and recovers; if the token is spent it keeps the current credentials and retries (it does not exit or wipe anything), so a decommissioned agent idles quietly. To give such an agent a new identity, redeploy with a fresh token. |
 

@@ -7,20 +7,26 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import ssl
+import types
 
 import pytest
+from websockets.exceptions import InvalidStatus
 
 from agent.tunnel import (
     _DATA,
     _HOSTS_REPORTED_MAX,
     _OPEN_ERR,
+    _PROBE_TIMEOUT,
     RefusalLog,
     Refused,
     TunnelClient,
     TunnelManager,
     _decode,
     _encode,
+    explain_probe_failure,
     normalize_host,
+    probe,
     summarize_addresses,
     tunnel_url,
 )
@@ -298,3 +304,92 @@ def test_full_refusal_lines_are_capped_across_distinct_hosts(
     rollup = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
     assert len(rollup) == 1
     assert f"to {_HOSTS_REPORTED_MAX} host(s)" in rollup[0]  # the ones over budget still accounted
+
+
+# --- startup preflight: rehearse the data plane before a hunt depends on it -------------------
+
+
+def _http_response(status: int):
+    """A websockets HTTP response object, as InvalidStatus carries when an upgrade is refused."""
+    return types.SimpleNamespace(status_code=status)
+
+
+def test_a_refused_upgrade_is_named_as_a_refusal_not_a_network_block() -> None:
+    # An HTTP status where a 101 belongs is the signature that matters: something spoke HTTP back,
+    # so we reached a server and it declined. That is a very different fix from "port blocked".
+    explanation = explain_probe_failure(InvalidStatus(_http_response(502)))
+
+    assert "HTTP 502" in explanation
+    assert "101" in explanation
+    assert "WebSocket upgrades allowed" in explanation
+
+
+def test_a_rejected_upgrade_points_at_a_stripped_header_when_the_control_plane_works() -> None:
+    # 401 on the upgrade while HTTPS succeeds is much more often a proxy dropping the
+    # Authorization header than a genuinely bad token, and those have opposite fixes.
+    explanation = explain_probe_failure(InvalidStatus(_http_response(401)))
+
+    assert "Authorization" in explanation
+
+
+def test_a_timed_out_upgrade_is_named_as_a_silent_drop() -> None:
+    assert "silently dropping" in explain_probe_failure(TimeoutError())
+
+
+def test_an_unremarkable_failure_gets_no_invented_explanation() -> None:
+    # The raw error is better than a confident guess, so callers append this unconditionally.
+    assert explain_probe_failure(OSError("connection refused")) == ""
+
+
+async def test_the_probe_opens_and_closes_without_sending_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The upgrade completing is the whole result: a probe that sent frames could be mistaken by
+    ares for a live tunnel with a stream on it."""
+    opened: dict[str, object] = {}
+
+    class _Connection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            opened["closed"] = True
+
+        async def send(self, _frame):  # pragma: no cover - must never be called
+            raise AssertionError("the probe must not send frames")
+
+    def _connect(url, **kwargs):
+        opened.update({"url": url, **kwargs})
+        return _Connection()
+
+    monkeypatch.setattr("agent.tunnel.websockets.connect", _connect)
+    context = ssl.create_default_context()
+
+    await probe("wss://ares.example.com/api/v1/agent/tunnel", "tok", ssl_context=context)
+
+    assert opened["closed"] is True
+    assert opened["ssl"] is context  # the shared trust, so the probe proves the real thing
+    assert opened["additional_headers"] == {"Authorization": "Bearer tok"}
+    assert opened["open_timeout"] == _PROBE_TIMEOUT  # bounded: a blackhole costs one slow start
+
+
+async def test_the_probe_sends_no_ssl_context_for_a_plaintext_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class _Connection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(
+        "agent.tunnel.websockets.connect",
+        lambda url, **kwargs: (seen.update(kwargs), _Connection())[1],
+    )
+
+    await probe("ws://localhost:8080/api/v1/agent/tunnel", "tok", ssl_context=ssl.create_default_context())
+
+    assert seen["ssl"] is None

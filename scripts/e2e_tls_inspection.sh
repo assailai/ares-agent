@@ -28,7 +28,7 @@ T="$(mktemp -d)"
 PASS=0 FAIL=0
 
 cleanup() {
-    docker rm -f tls-e2e-echo tls-e2e-ares tls-e2e-proxy tls-e2e-agent >/dev/null 2>&1
+    docker rm -f tls-e2e-echo tls-e2e-ares tls-e2e-proxy tls-e2e-agent tls-e2e-blocked >/dev/null 2>&1
     docker network rm "$NET" >/dev/null 2>&1
     rm -rf "$T"
 }
@@ -208,12 +208,79 @@ case "$RESULT" in
     *) bad "tunnel round trip: $RESULT" ;;
 esac
 
+case "$LOG" in
+    *"Preflight: control plane OK"*) ok "the startup preflight reports the control plane" ;;
+    *) bad "no control-plane preflight line" ;;
+esac
+case "$LOG" in
+    *"Preflight: data-plane tunnel OK"*) ok "the startup preflight rehearses the tunnel" ;;
+    *) bad "no data-plane preflight line" ;;
+esac
+
 echo
 echo "3. The proxy really terminated and re-signed the WebSocket, rather than passing it through"
 case "$(docker logs tls-e2e-proxy 2>&1)" in
     *"WebSocket binary message"*) ok "mitmproxy logged the individual WebSocket frames" ;;
     *) bad "no WebSocket frames in the proxy log; interception is unproven" ;;
 esac
+
+echo
+echo "4. A proxy that allows HTTPS but refuses the WebSocket upgrade must be caught at startup"
+# The failure this whole preflight exists for: everything looks healthy, and then the first real
+# hunt dies. Point the agent at a control plane whose /tunnel answers 403 instead of upgrading.
+docker rm -f tls-e2e-blocked >/dev/null 2>&1
+cat > "$T/blocker.py" <<'PY'
+from aiohttp import web
+
+
+async def register(request):
+    return web.json_response({
+        "agent_id": "agt_blocked", "agent_token": "tok_blocked",
+        "heartbeat_interval_seconds": 5, "poll_interval_seconds": 5,
+    })
+
+
+app = web.Application()
+app.add_routes([
+    web.post("/api/v1/agent/register", register),
+    web.post("/api/v1/agent/heartbeat", lambda r: web.json_response({})),
+    web.get("/api/v1/agent/tasks", lambda r: web.json_response({"tasks": []})),
+    # what an inspecting proxy that has not been told to allow upgrades does
+    web.get("/api/v1/agent/tunnel", lambda r: web.Response(status=403, text="upgrade not allowed")),
+])
+web.run_app(app, host="0.0.0.0", port=8000, print=None)
+PY
+docker run -d --name tls-e2e-blocked --network "$NET" --network-alias blocked-ares \
+    -v "$T/blocker.py:/blocker.py:ro" python:3.12-slim \
+    sh -c "pip install -q aiohttp && python /blocker.py" >/dev/null
+for _ in $(seq 1 60); do
+    docker run --rm --network "$NET" curlimages/curl -s --max-time 3 \
+        http://tls-e2e-blocked:8000/api/v1/agent/tasks >/dev/null 2>&1 && break
+    sleep 2
+done
+docker rm -f tls-e2e-agent >/dev/null 2>&1
+docker run -d --name tls-e2e-agent --network "$NET" \
+    -e ARES_TOKEN=t -e ARES_URL=http://blocked-ares:8000 -e ARES_NETWORKS="$SUBNET" \
+    "$IMAGE" >/dev/null
+sleep 15
+LOG="$(docker logs tls-e2e-agent 2>&1)"
+case "$LOG" in
+    *"Preflight: control plane OK"*) ok "the control plane still reports healthy, as it would" ;;
+    *) bad "the control plane should have been fine here" ;;
+esac
+case "$LOG" in
+    *"Preflight: data-plane tunnel FAILED"*) ok "the blocked upgrade is caught at startup" ;;
+    *) bad "a blocked WebSocket upgrade went unreported" ;;
+esac
+case "$LOG" in
+    *"HTTP 403"*|*"WebSocket upgrades allowed"*) ok "the failure names the likely cause" ;;
+    *) bad "the failure gave no diagnosis" ;;
+esac
+case "$LOG" in
+    *"Agent online"*) ok "the agent still comes online rather than refusing to start" ;;
+    *) bad "a blocked tunnel must degrade, not stop the agent" ;;
+esac
+docker rm -f tls-e2e-blocked >/dev/null 2>&1
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

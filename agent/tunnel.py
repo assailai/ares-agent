@@ -49,6 +49,9 @@ _DIAL_TIMEOUT = 10.0
 _RESOLVE_TIMEOUT = 5.0
 _RECONNECT_BACKOFF_MIN = 1.0
 _RECONNECT_BACKOFF_MAX = 30.0
+# Startup rehearsal of the data plane (see probe). Bounded so a network that blackholes the
+# upgrade costs one slow startup rather than hanging the agent before it comes online.
+_PROBE_TIMEOUT = 15.0
 _ADDRESSES_NAMED = 3  # resolved addresses a refusal names before it counts the rest
 _ROLLUP_INTERVAL = 60.0  # seconds between rollups of the repeats that were not logged in full
 # Distinct hosts explained in full before the log falls back to counting. The page under test decides
@@ -74,6 +77,57 @@ def tunnel_url(base_url: str) -> str:
     elif ws.startswith("http://"):
         ws = "ws://" + ws[len("http://") :]
     return f"{ws}/api/v1/agent/tunnel"
+
+
+async def probe(url: str, token: str, *, ssl_context: ssl.SSLContext | None) -> None:
+    """Open the tunnel, prove the upgrade works, and close it again. Raises if it does not.
+
+    The data plane is only opened while a hunt is running, so without this an operator does not
+    find out that their network blocks the WebSocket upgrade until the first real assessment,
+    which is the worst possible moment. ares authenticates the upgrade on the agent token alone
+    and does not require a running hunt, so this is a true rehearsal of the real thing.
+    """
+    context = ssl_context if url.startswith("wss://") else None
+    async with websockets.connect(
+        url,
+        additional_headers={"Authorization": f"Bearer {token}"},
+        ssl=context,
+        open_timeout=_PROBE_TIMEOUT,
+        close_timeout=_PROBE_TIMEOUT,
+    ):
+        pass  # the upgrade completing is the whole result
+
+
+def explain_probe_failure(exc: BaseException) -> str:
+    """What to actually do about a failed probe, or "" when we have nothing specific to add.
+
+    An HTTP status where a 101 belongs is the signature worth naming: it means something spoke
+    HTTP back to us, so we reached a server and it declined to upgrade. On a network that
+    inspects TLS that is usually the proxy rather than ares.
+    """
+    if isinstance(exc, websockets.exceptions.InvalidStatus):
+        status = exc.response.status_code
+        if status in (401, 403):
+            # Genuinely ambiguous: ares answers 403 when it rejects the token (Starlette turns a
+            # close-before-accept into one), and a proxy refusing an upgrade usually answers 403
+            # too. Rather than guess, hand over the discriminator.
+            return (
+                " Either ares rejected the agent token on the upgrade, or something in the path "
+                "refused it. The control-plane line above tells you which: if that succeeded, "
+                "the same token is good, so the upgrade is being blocked or its Authorization "
+                "header stripped, most likely by a proxy."
+            )
+        return (
+            f" Something answered with HTTP {status} where a 101 upgrade belongs, so the "
+            "WebSocket was refused rather than the connection blocked. A proxy that inspects "
+            "TLS often needs WebSocket upgrades allowed explicitly for this host."
+        )
+    if isinstance(exc, TimeoutError):
+        return (
+            " The upgrade timed out. Traffic reached the network but nothing completed the "
+            "handshake, which is what a proxy silently dropping WebSocket upgrades looks like."
+        )
+    return ""
 
 
 def normalize_host(host: str) -> str:

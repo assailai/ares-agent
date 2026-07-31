@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import resource
+import ssl
 import sys
 import time
 from urllib.parse import urlparse
@@ -24,7 +25,8 @@ from agent import control_plane, netdetect, scan, tlsconf
 from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.state import AgentState, load_state, save_state
-from agent.tunnel import TunnelManager, tunnel_url
+from agent.tunnel import TunnelManager, explain_probe_failure, tunnel_url
+from agent.tunnel import probe as tunnel_probe
 
 logger = logging.getLogger("ares.agent")
 
@@ -137,6 +139,41 @@ def _tls_hint(exc: BaseException) -> str:
     return tlsconf.verification_hint(
         exc, insecure=settings.insecure, ca_bundle=settings.ca_bundle
     )
+
+
+async def _preflight(state: AgentState, ssl_context: ssl.SSLContext) -> None:
+    """Exercise both planes at startup and say plainly whether each one works.
+
+    The control plane proves itself by being used. The data plane does not: it is only opened
+    while a hunt is running, so a network that permits our HTTPS but blocks WebSocket upgrades
+    looks completely healthy right up until the first assessment, and then fails in the middle of
+    it. Rehearsing it here moves that discovery to enrollment, where an operator is watching.
+
+    Never fatal. An agent that can reach the control plane is still useful (it enrolls, heartbeats
+    and reports), and refusing to start would turn a degraded deployment into no deployment. The
+    log is loud instead, and the serve loop carries on.
+    """
+    token = state.agent_token or ""
+    try:
+        await control_plane.heartbeat(settings, token)
+        # Worth its own line even though registration just succeeded: that used the one-time
+        # registration token, and this is the first proof the long-lived agent token works.
+        logger.info("Preflight: control plane OK (%s)", settings.base_url)
+    except (httpx.HTTPError, OSError) as exc:
+        logger.error("Preflight: control plane FAILED: %s%s", exc, _tls_hint(exc))
+
+    url = tunnel_url(settings.base_url)
+    try:
+        await tunnel_probe(url, token, ssl_context=ssl_context)
+        logger.info("Preflight: data-plane tunnel OK (%s)", url)
+    except Exception as exc:  # noqa: BLE001 - a probe must never be the thing that stops the agent
+        logger.error(
+            "Preflight: data-plane tunnel FAILED: %s.%s%s Hunts that reach into your network "
+            "need this; the agent will keep running and retry when one starts.",
+            exc,
+            _tls_hint(exc),
+            explain_probe_failure(exc),
+        )
 
 
 def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
@@ -489,6 +526,8 @@ async def run() -> int:
     state = await _enroll(networks)
     if state is None:
         return 1
+
+    await _preflight(state, trust.context)
 
     # Serve forever, self-healing across credential rejections. A sustained 401 means the
     # stored token was rejected (stale kept-volume creds, or a decommissioned agent); we try
