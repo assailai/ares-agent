@@ -35,14 +35,26 @@ def _isolate_trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     tlsconf.build_trust.cache_clear()
 
 
+def _build(*, insecure: bool = False, ca_bundle: str = "") -> tlsconf.AgentTrust:
+    """build_trust with test defaults. The real one takes both arguments required, so that two
+    spellings cannot cache two different contexts (see its docstring); the defaults live here
+    instead, where a second context costs nothing."""
+    return tlsconf.build_trust(insecure=insecure, ca_bundle=ca_bundle)
+
+
+def _hint(exc: BaseException) -> str:
+    """verification_hint with the same test defaults."""
+    return tlsconf.verification_hint(exc, insecure=False, ca_bundle="")
+
+
 def _write_ca(directory: Path, name: str) -> tuple[Path, str]:
-    """A real CA PEM on disk, plus the common name to look for in a loaded context."""
+    """A real CA PEM on disk, plus the organization name to look for in a loaded context."""
     directory.mkdir(parents=True, exist_ok=True)
-    common_name = f"{name}.test"
-    authority = trustme.CA(organization_name=common_name)
+    organization = f"{name}.test"
+    authority = trustme.CA(organization_name=organization)
     path = directory / f"{name}.crt"
     authority.cert_pem.write_to_path(str(path))
-    return path, common_name
+    return path, organization
 
 
 def _organizations(context: ssl.SSLContext) -> set[str]:
@@ -57,7 +69,7 @@ def _organizations(context: ssl.SSLContext) -> set[str]:
 
 def test_given_nothing_mounted_then_public_roots_are_still_trusted() -> None:
     """The normal case for every customer who is not behind an inspecting proxy."""
-    trust = tlsconf.build_trust()
+    trust = _build()
 
     assert trust.verifies
     assert trust.loaded == ()
@@ -75,7 +87,7 @@ def test_given_a_ca_in_host_ca_then_it_is_trusted_alongside_the_public_roots(
     host_ca, _ = _isolate_trust
     _, organization = _write_ca(host_ca, "corp-root")
 
-    trust = tlsconf.build_trust()
+    trust = _build()
 
     assert organization in _organizations(trust.context)
     assert len(trust.context.get_ca_certs()) > 50  # union, never replacement
@@ -88,7 +100,7 @@ def test_given_a_ca_in_certs_then_it_is_trusted(_isolate_trust: tuple[Path, Path
     _, extra = _isolate_trust
     _, organization = _write_ca(extra, "k8s-root")
 
-    assert organization in _organizations(tlsconf.build_trust().context)
+    assert organization in _organizations(_build().context)
 
 
 def test_given_both_directories_then_every_root_is_trusted(
@@ -98,7 +110,7 @@ def test_given_both_directories_then_every_root_is_trusted(
     _, from_host = _write_ca(host_ca, "host-root")
     _, from_mount = _write_ca(extra, "drop-in-root")
 
-    organizations = _organizations(tlsconf.build_trust().context)
+    organizations = _organizations(_build().context)
 
     assert {from_host, from_mount} <= organizations
 
@@ -115,7 +127,7 @@ def test_given_dangling_symlinks_then_the_real_bundle_loads_and_nothing_is_logge
         (host_ca / f"{index:08x}.0").symlink_to("/usr/share/ca-certificates/nowhere.crt")
 
     with caplog.at_level(logging.WARNING, logger="ares.agent.tls"):
-        trust = tlsconf.build_trust()
+        trust = _build()
 
     assert organization in _organizations(trust.context)
     assert [path.name for path in trust.loaded] == ["real-root.crt"]
@@ -133,7 +145,7 @@ def test_given_a_malformed_ca_then_it_is_reported_and_the_valid_one_still_loads(
     (host_ca / "broken.pem").write_text("-----BEGIN CERTIFICATE-----\nnot a certificate\n")
 
     with caplog.at_level(logging.WARNING, logger="ares.agent.tls"):
-        trust = tlsconf.build_trust()
+        trust = _build()
 
     assert organization in _organizations(trust.context)
     assert [path.name for path in trust.rejected] == ["broken.pem"]
@@ -144,7 +156,7 @@ def test_given_a_malformed_ca_then_it_is_reported_and_the_valid_one_still_loads(
 def test_given_ares_ca_bundle_as_a_file_then_it_is_trusted(tmp_path: Path) -> None:
     path, organization = _write_ca(tmp_path / "elsewhere", "bundle-file-root")
 
-    trust = tlsconf.build_trust(ca_bundle=str(path))
+    trust = _build(ca_bundle=str(path))
 
     assert organization in _organizations(trust.context)
 
@@ -157,13 +169,13 @@ def test_given_ares_ca_bundle_as_a_directory_then_every_pem_inside_is_trusted(
     _, first = _write_ca(directory, "dir-root-a")
     _, second = _write_ca(directory, "dir-root-b")
 
-    organizations = _organizations(tlsconf.build_trust(ca_bundle=str(directory)).context)
+    organizations = _organizations(_build(ca_bundle=str(directory)).context)
 
     assert {first, second} <= organizations
 
 
 def test_given_insecure_then_verification_is_off_and_the_summary_says_so() -> None:
-    trust = tlsconf.build_trust(insecure=True)
+    trust = _build(insecure=True)
 
     assert not trust.verifies
     assert trust.context.verify_mode == ssl.CERT_NONE
@@ -178,7 +190,7 @@ def test_given_a_certificate_error_then_the_hint_names_the_remedy() -> None:
     wrapped = ConnectionError("cannot connect")
     wrapped.__cause__ = error
 
-    hint = tlsconf.verification_hint(wrapped)
+    hint = _hint(wrapped)
 
     assert "inspecting TLS" in hint
     assert "/certs" in hint
@@ -187,7 +199,7 @@ def test_given_a_certificate_error_then_the_hint_names_the_remedy() -> None:
 
 def test_given_an_ordinary_connection_error_then_there_is_no_hint() -> None:
     """Appended unconditionally by the caller, so it has to stay empty for a plain timeout."""
-    assert tlsconf.verification_hint(TimeoutError("timed out")) == ""
+    assert _hint(TimeoutError("timed out")) == ""
 
 
 def test_given_a_self_referential_cause_chain_then_the_hint_terminates() -> None:
@@ -197,7 +209,7 @@ def test_given_a_self_referential_cause_chain_then_the_hint_terminates() -> None
     first.__cause__ = second
     second.__cause__ = first
 
-    assert tlsconf.verification_hint(first) == ""
+    assert _hint(first) == ""
 
 
 def test_the_control_plane_client_verifies_with_the_shared_context(
@@ -225,7 +237,7 @@ def test_the_tunnel_takes_a_context_rather_than_building_its_own() -> None:
     contexts is how they silently drift apart."""
     from agent.tunnel import TunnelClient
 
-    context = tlsconf.build_trust().context
+    context = _build().context
     client = TunnelClient("wss://x/api/v1/agent/tunnel", "tok", [], set(), ssl_context=context)
 
     assert client._ssl_context is context

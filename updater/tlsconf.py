@@ -29,7 +29,7 @@ EXTRA_CA_DIR = Path("/certs")
 # Alpine's system bundle, the base we merge on top of so public roots survive.
 IMAGE_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 # Written at startup. /tmp so this works whether or not the updater runs as root.
-MERGED_BUNDLE = Path("/tmp/ares-ca-bundle.pem")  # noqa: S108 - deliberate, see above
+MERGED_BUNDLE = Path("/tmp/ares-ca-bundle.pem")
 
 _PEM_SUFFIXES = frozenset({".crt", ".pem", ".cer"})
 
@@ -64,6 +64,9 @@ def install_ca_bundle() -> Path | None:
     chunks: list[str] = []
     for source in [IMAGE_BUNDLE, *mounted]:
         try:
+            # errors="ignore" because a DER-encoded .cer among the PEMs would otherwise raise and
+            # cost us the whole bundle. OpenSSL skips anything outside the BEGIN/END markers, so
+            # the mangled bytes are inert and the real certificates around them still load.
             chunks.append(source.read_text(encoding="utf-8", errors="ignore"))
         except OSError as exc:
             logger.warning("Ignoring CA file %s: %s", source, exc)

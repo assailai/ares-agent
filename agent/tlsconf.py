@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import ssl
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
@@ -49,10 +50,17 @@ class AgentTrust(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     context: ssl.SSLContext
-    # False only under ARES_INSECURE, which main.py already refuses against a production URL.
-    verifies: bool
     loaded: tuple[Path, ...] = ()
     rejected: tuple[Path, ...] = ()
+
+    @property
+    def verifies(self) -> bool:
+        """Whether certificates are checked at all.
+
+        Derived from the context rather than stored alongside it, so the two cannot drift apart.
+        False only under ARES_INSECURE, which main.py already refuses against a production URL.
+        """
+        return self.context.verify_mode != ssl.CERT_NONE
 
     def summary(self) -> str:
         """One line for the startup log, so ``docker logs`` answers "did it see my CA?" before
@@ -60,9 +68,10 @@ class AgentTrust(BaseModel):
         if not self.verifies:
             return "verification DISABLED (ARES_INSECURE)"
         parts = ["image store", "certifi"]
-        for directory in sorted({path.parent for path in self.loaded}):
-            count = sum(1 for path in self.loaded if path.parent == directory)
-            parts.append(f"{directory} ({count} file{'s' if count != 1 else ''})")
+        # Grouped by directory, because which mount worked is the useful half of the answer:
+        # "/host-ca (1 file)" says the host store came through, "/certs (1 file)" the drop-in did.
+        for directory, count in sorted(Counter(path.parent for path in self.loaded).items()):
+            parts.append(f"{directory} ({count} file{'' if count == 1 else 's'})")
         line = ", ".join(parts)
         if self.rejected:
             line += f"; unreadable: {', '.join(str(path) for path in self.rejected)}"
@@ -88,26 +97,33 @@ def _pems_in(directory: Path) -> list[Path]:
 def _candidate_files(ca_bundle: str) -> list[Path]:
     """The extra CA files to load on top of the image store and certifi."""
     paths = _pems_in(HOST_CA_DIR) + _pems_in(EXTRA_CA_DIR)
-    if ca_bundle:
-        named = Path(ca_bundle)
-        # ARES_CA_BUNDLE takes a file or a directory, because operators reasonably expect both.
-        paths += _pems_in(named) if named.is_dir() else [named]
-    return paths
+    if not ca_bundle:
+        return paths
+    # ARES_CA_BUNDLE takes a file or a directory, because operators reasonably expect both. A
+    # named file is passed through unfiltered, suffix and all: they told us to trust it, and a
+    # path that turns out not to exist should say so rather than vanish.
+    configured = Path(ca_bundle)
+    return paths + (_pems_in(configured) if configured.is_dir() else [configured])
 
 
 @lru_cache(maxsize=None)
-def build_trust(*, insecure: bool = False, ca_bundle: str = "") -> AgentTrust:
+def build_trust(*, insecure: bool, ca_bundle: str) -> AgentTrust:
     """The agent's trust, built once and shared.
 
     Cached because ``control_plane`` opens a fresh ``AsyncClient`` per call: without it, every
     heartbeat and every task poll would re-parse the whole bundle. An ``SSLContext`` is meant to
     be shared across connections, so handing the same one out is the intended use.
+
+    Both arguments are required on purpose. ``lru_cache`` keys on the arguments as *written*, so
+    with defaults ``build_trust()`` and ``build_trust(insecure=False, ca_bundle="")`` would be two
+    cache entries holding two different contexts, and the "one context for the whole agent"
+    promise above would quietly hold only because every caller happened to spell it the same way.
     """
     if insecure:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        return AgentTrust(context=context, verifies=False)
+        return AgentTrust(context=context)
 
     # The image's own store first. This is also what picks up SSL_CERT_FILE / SSL_CERT_DIR, so an
     # operator who already set either (the documented fix for older agents) keeps working.
@@ -128,18 +144,16 @@ def build_trust(*, insecure: bool = False, ca_bundle: str = "") -> AgentTrust:
             rejected.append(path)
         else:
             loaded.append(path)
-    return AgentTrust(
-        context=context, verifies=True, loaded=tuple(loaded), rejected=tuple(rejected)
-    )
+    return AgentTrust(context=context, loaded=tuple(loaded), rejected=tuple(rejected))
 
 
-def verification_hint(exc: BaseException, *, insecure: bool = False, ca_bundle: str = "") -> str:
+def verification_hint(exc: BaseException, *, insecure: bool, ca_bundle: str) -> str:
     """A remedy to append to a connection error, when that error is a certificate rejection.
 
-    Returns ``""`` for every other failure, so callers can append it unconditionally. The raw
-    OpenSSL string ("self-signed certificate in certificate chain") tells an operator what
-    happened and nothing about what to do, which is exactly the gap that turns a five-minute
-    mount into a week of email.
+    Returns ``""`` for every other failure, and is prefixed with its own space when it is not
+    empty, so a caller can append it unconditionally. The raw OpenSSL string ("self-signed
+    certificate in certificate chain") tells an operator what happened and nothing about what to
+    do, which is exactly the gap that turns a five-minute mount into a week of email.
     """
     seen: set[int] = set()
     cause: BaseException | None = exc
