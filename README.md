@@ -178,6 +178,11 @@ If it says only `image store, certifi`, the mount did not happen. Add it by hand
 -v /etc/ssl/certs:/host-ca:ro
 ```
 
+Both halves of the agent are covered: the control plane and the `wss://` data-plane tunnel that
+live missions run over. `bash scripts/e2e_tls_inspection.sh` proves it against a real mitmproxy,
+driving a stream through the inspected tunnel to an internal host and asserting it comes back
+byte for byte.
+
 Two cases need more than the host store:
 
 - **Kubernetes**, where there is no host directory to mount. Put the root in a ConfigMap and
@@ -195,6 +200,13 @@ ignored the OS trust store entirely, the equivalent is two flags:
 ```bash
 -v /etc/ssl/certs:/host-ca:ro -e SSL_CERT_FILE=/host-ca/ca-certificates.crt
 ```
+
+**One limit worth knowing.** All of the above covers *transparent* inspection, where the proxy is
+in the network path and the agent dials Ares directly. An **explicit** proxy (one you point at
+with `HTTPS_PROXY`) is not supported end to end: httpx honours the variable for the control
+plane, but the tunnel's `websockets` client does not, so hunts would fail while the agent looked
+online. If your network requires an explicit proxy rather than inspecting in-path, tell us before
+you deploy.
 
 ## Security
 
