@@ -203,6 +203,17 @@ Mount the same thing into `ares-updater`. It runs `cosign` to verify image signa
 same proxy and fails closed, so without the CAs the agent stays online but silently stops
 auto-updating.
 
+**When your inspection root rotates**, restart the agent so it picks the new one up:
+
+```bash
+docker restart ares-agent ares-updater
+```
+
+The agent reads the CA store once, at startup. The mount is of the *directory*, so the container
+already sees the rotated file, but the running process is still verifying against what it read
+when it started and will fail until it is restarted. No need to recreate the container or re-run
+the install command: the mount and the token are unchanged, only the process needs to re-read.
+
 **On an agent older than 3.4.0**, which verified against a bundle inside the Python package and
 ignored the OS trust store entirely, the equivalent is two flags:
 
