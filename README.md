@@ -188,9 +188,16 @@ If it says only `image store, certifi`, the mount did not happen. Add it by hand
 ```
 
 Both halves of the agent are covered: the control plane and the `wss://` data-plane tunnel that
-live missions run over. `bash scripts/e2e_tls_inspection.sh` proves it against a real mitmproxy,
-driving a stream through the inspected tunnel to an internal host and asserting it comes back
-byte for byte.
+live missions run over. Two scripts prove it, and both are worth re-running before onboarding a
+customer onto an inspecting network:
+
+- `scripts/e2e_tls_inspection.sh` proves the mechanism against a real mitmproxy, driving a stream
+  through the inspected tunnel to an internal host and asserting it comes back byte for byte.
+- `scripts/e2e_customer_rehearsal.sh` proves the *deployment*: a Debian host with its own Docker
+  daemon, the root installed the way an IT team installs it (`update-ca-certificates`), a proxy
+  signing with that same root, and then this repo's `bootstrap.sh` run with nothing added. It
+  includes a negative control, so a pass means the fix worked rather than the environment
+  being too forgiving.
 
 Two cases need more than the host store:
 
