@@ -24,6 +24,7 @@ import httpx
 from agent import control_plane, netdetect, scan, tlsconf
 from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
+from agent.hostpins import HostPins
 from agent.state import AgentState, load_state, save_state
 from agent.tunnel import (
     TunnelManager,
@@ -518,6 +519,10 @@ async def run() -> int:
     # verification error.
     trust = tlsconf.build_trust(insecure=settings.insecure, ca_bundle=settings.ca_bundle)
     logger.info("TLS trust: %s", trust.summary())
+    # Same reasoning as the TLS line above: a pin silently not being picked up is exactly the
+    # failure that wastes an afternoon, so say what we loaded before anything can depend on it.
+    pins = HostPins(aliases=settings.host_aliases)
+    logger.info("Host pins: %s", pins.summary())
     networks = settings.network_overrides() or netdetect.scan_targets(settings.scan_scope)
     if not networks:
         logger.warning(
@@ -545,6 +550,7 @@ async def run() -> int:
             state.agent_token or "",
             networks,
             ssl_context=trust.context,
+            pins=pins,
         )
         try:
             await _serve(state, tunnel)

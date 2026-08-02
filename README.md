@@ -129,12 +129,14 @@ The agent is configured entirely through environment variables (all prefixed `AR
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARES_TOKEN` | *(required)* | One-time registration token from the dashboard. The agent exits with a clear message if it is missing. |
-| `ARES_URL` | `https://api.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
+| `ARES_URL` | `https://ares.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
 | `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection. You can also edit the networks in the dashboard after enrollment. |
 | `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
 | `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
 | `ARES_CA_BUNDLE` | *(none)* | Extra CA roots to trust, as a PEM file or a directory of them. Rarely needed: the agent already trusts this host's CA store (see [TLS inspection](#tls-inspection-corporate-proxy)). Set it only for a root that is in neither the host store nor `/certs`. |
+| `ARES_HOST_ALIASES` | *(none)* | Static `name=address` pins, comma or space separated, e.g. `sso.acme.internal=10.1.2.3`. Rarely needed: the agent already reads this host's `/etc/hosts` (see [Name resolution](#name-resolution)). Set it only for a pin that is not in there. |
+| `ARES_DNS` | *(none)* | Extra resolvers for the container, comma separated. Read by the install command, not the agent. Only needed when this host's own resolver cannot answer an internal name. |
 
 ### Volume
 
@@ -169,8 +171,8 @@ rehearses both planes at startup so you find out at enrollment rather than mid-a
 
 ```
 INFO ares.agent TLS trust: image store, certifi, /host-ca (1 file)
-INFO ares.agent Preflight: control plane OK (https://api.assailai.com)
-INFO ares.agent Preflight: data-plane tunnel OK (wss://api.assailai.com/api/v1/agent/tunnel)
+INFO ares.agent Preflight: control plane OK (https://ares.assailai.com)
+INFO ares.agent Preflight: data-plane tunnel OK (wss://ares.assailai.com/api/v1/agent/tunnel)
 ```
 
 Both lines matter. Hunts that reach into your network run over the tunnel, and a proxy that
@@ -220,6 +222,34 @@ ignored the OS trust store entirely, the equivalent is two flags:
 ```bash
 -v /etc/ssl/certs:/host-ca:ro -e SSL_CERT_FILE=/host-ca/ca-certificates.crt
 ```
+
+## Name resolution
+
+A hunt that reaches an internal host resolves that host's name **on this machine**, deliberately:
+an internal name often only exists on your DNS, and split-horizon DNS would give Ares the wrong
+answer. So the agent is only as good as this host's resolver.
+
+**The agent reads this host's `/etc/hosts`.** The install command mounts it read-only at
+`/host-hosts`, and the agent prefers a pin found there over DNS. This is worth stating plainly
+because the obvious thing does *not* work on its own: a container gets Docker's own `/etc/hosts`
+even under `--network host` (host networking shares the network namespace, not the mount
+namespace), so before 3.5.0, editing `/etc/hosts` on the machine had no effect on the agent at
+all. The file is re-read when it changes, so adding a pin later needs no restart:
+
+```bash
+echo "10.1.2.3  sso.acme.internal" | sudo tee -a /etc/hosts
+```
+
+For a pin you do not want in the host file, `ARES_HOST_ALIASES=sso.acme.internal=10.1.2.3` does
+the same thing. Either way a pin only supplies the *address* DNS would have; the destination is
+still checked against this agent's registered networks and what Ares approved, so pinning a name
+can never widen what the agent will reach.
+
+**A slow resolver is not a broken one.** glibc walks the nameservers in `/etc/resolv.conf` in
+order at roughly five seconds each, so a name the first server will not answer only resolves once
+it falls through to the second. The agent allows 15s for a lookup for exactly this reason. If you
+see `did not resolve on this agent within 15s`, the resolver genuinely never answered: pin the
+name, or point the container at a resolver that can answer it with `ARES_DNS`.
 
 **One limit worth knowing.** All of the above covers *transparent* inspection, where the proxy is
 in the network path and the agent dials Ares directly. An **explicit** proxy (one you point at

@@ -50,7 +50,12 @@ RUN addgroup -g ${GID} ares && adduser -u ${UID} -G ares -h /app -s /sbin/nologi
     # the host's own CA directory read-only, so a network that inspects TLS needs no config;
     # /certs is the manual drop-in for a root the host store does not have. Both are optional:
     # agent.tlsconf skips a directory that is not mounted. Read-only in use, hence 0555.
-    && mkdir -p /host-ca /certs && chmod 555 /host-ca /certs
+    && mkdir -p /host-ca /certs && chmod 555 /host-ca /certs \
+    # The host's own /etc/hosts, mounted read-only by the install command. Same shape as /host-ca
+    # and for the same reason: a container gets docker's /etc/hosts even under --network host, so a
+    # name pinned on the machine is otherwise invisible here. Optional; agent.hostpins skips it
+    # when it is not mounted. Created as an empty FILE, not a directory, to match the bind source.
+    && touch /host-hosts && chmod 444 /host-hosts
 
 WORKDIR /app
 COPY --chown=ares:ares agent/ ./agent/

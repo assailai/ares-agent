@@ -13,6 +13,7 @@ import types
 import pytest
 from websockets.exceptions import InvalidStatus
 
+from agent.hostpins import HostPins
 from agent.tunnel import (
     _DATA,
     _HOSTS_REPORTED_MAX,
@@ -20,6 +21,7 @@ from agent.tunnel import (
     _PROBE_TIMEOUT,
     RefusalLog,
     Refused,
+    host_approved,
     TunnelClient,
     TunnelManager,
     _decode,
@@ -66,7 +68,7 @@ def _stub_resolver(client: TunnelClient, mapping: dict[str, list[str]]) -> None:
 
 
 def test_tunnel_url_maps_scheme_and_path() -> None:
-    assert tunnel_url("https://api.assailai.com") == "wss://api.assailai.com/api/v1/agent/tunnel"
+    assert tunnel_url("https://ares.assailai.com") == "wss://ares.assailai.com/api/v1/agent/tunnel"
     assert (
         tunnel_url("http://host.docker.internal:8000/")
         == "ws://host.docker.internal:8000/api/v1/agent/tunnel"
@@ -394,3 +396,120 @@ async def test_the_probe_sends_no_ssl_context_for_a_plaintext_url(
     await probe(url, "tok", ssl_context=ssl.create_default_context())
 
     assert seen["ssl"] is None
+
+
+# --- host approval: wildcard, suffix, exact -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "allowed", "expected"),
+    [
+        # exact, as before
+        ("staging.acme.com", {"staging.acme.com"}, True),
+        ("other.acme.com", {"staging.acme.com"}, False),
+        # suffix forms. This is the hole exact-match left: ares ships okta.com / auth0.com /
+        # pingone.com as built-in identity providers, but every real tenant is <name>.okta.com,
+        # so none of those entries ever matched anything at all.
+        ("acme.okta.com", {".okta.com"}, True),
+        ("acme.okta.com", {"*.okta.com"}, True),
+        ("okta.com", {".okta.com"}, True),
+        ("deep.sub.okta.com", {"*.okta.com"}, True),
+        # a suffix entry must not match a host that merely ENDS WITH the text
+        ("notokta.com", {".okta.com"}, False),
+        ("okta.com.evil.test", {".okta.com"}, False),
+        # the wildcard opens any name
+        ("anything.at.all.example", {"*"}, True),
+        ("agtacc.allstate.com", {"*"}, True),
+        # case and the root dot are irrelevant on both sides
+        ("ACME.Okta.Com.", {"*.OKTA.com"}, True),
+        # empties are never a destination
+        ("", {"*"}, False),
+        ("host.example.com", {"", "   "}, False),
+    ],
+)
+def test_host_approved(host: str, allowed: set[str], expected: bool) -> None:
+    assert host_approved(host, allowed) is expected
+
+
+def test_wildcard_does_not_widen_ip_literals() -> None:
+    """The wildcard opens NAMES. An address is still bounded by the registered networks, so it can
+    never be used to reach something this agent was not registered for."""
+    client = _client(allowed_hosts={"*"})
+    with pytest.raises(Refused, match="outside this agent's registered networks"):
+        asyncio.run(client._dial_address("203.0.113.10", 443))
+
+
+def test_wildcard_lets_an_unenumerated_login_host_through() -> None:
+    client = _client(allowed_hosts={"*"})
+    _stub_resolver(client, {"agtacc.allstate.com": ["167.127.118.229"]})
+    assert asyncio.run(client._dial_address("agtacc.allstate.com", 443)) == "167.127.118.229"
+
+
+# --- static pins ----------------------------------------------------------------------------
+
+
+def test_a_pin_short_circuits_dns_entirely(tmp_path) -> None:
+    """The point of a pin: a name the resolver will not answer still reaches its destination."""
+    path = tmp_path / "hosts"
+    path.write_text("167.127.118.229 agtacc.allstate.com\n")
+    client = TunnelClient(
+        "ws://x/api/v1/agent/tunnel",
+        "tok",
+        ["10.0.0.0/24"],
+        {"agtacc.allstate.com"},
+        ssl_context=None,
+        pins=HostPins(path=path),
+    )
+
+    async def go() -> str:
+        async def never_answers(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("DNS was consulted despite a pin")
+
+        asyncio.get_running_loop().getaddrinfo = never_answers  # type: ignore[method-assign]
+        return await client._dial_address("agtacc.allstate.com", 443)
+
+    assert asyncio.run(go()) == "167.127.118.229"
+
+
+def test_a_pin_supplies_an_address_never_authorization(tmp_path) -> None:
+    """A pinned address still has to pass the ordinary check, so pinning cannot widen the agent."""
+    path = tmp_path / "hosts"
+    path.write_text("203.0.113.10 rogue.example.com\n")
+    client = TunnelClient(
+        "ws://x/api/v1/agent/tunnel",
+        "tok",
+        ["10.0.0.0/24"],
+        set(),  # ares approved nothing
+        ssl_context=None,
+        pins=HostPins(path=path),
+    )
+    with pytest.raises(Refused, match="not an approved target"):
+        asyncio.run(client._dial_address("rogue.example.com", 443))
+
+
+def test_a_resolver_timeout_says_what_happened() -> None:
+    """str(TimeoutError()) is empty, so the old message stopped dead at the colon."""
+    client = _client()
+
+    async def hang(host, port, **kwargs):
+        await asyncio.sleep(3600)
+
+    async def go() -> None:
+        loop = asyncio.get_running_loop()
+        loop.getaddrinfo = hang  # type: ignore[method-assign]
+        with pytest.raises(Refused) as excinfo:
+            await client._resolve("slow.example.com", 443)
+        message = str(excinfo.value)
+        assert message.rstrip().endswith(")"), message
+        assert "did not resolve" in message
+        assert "the resolver did not answer" in message
+
+    # a real 15s wait would make the suite unusable; shrink the budget for this one assertion.
+    import agent.tunnel as tunnel_mod
+
+    original = tunnel_mod._RESOLVE_TIMEOUT
+    tunnel_mod._RESOLVE_TIMEOUT = 0.05
+    try:
+        asyncio.run(go())
+    finally:
+        tunnel_mod._RESOLVE_TIMEOUT = original

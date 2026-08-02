@@ -36,6 +36,8 @@ from collections.abc import Iterable
 
 import websockets
 
+from agent.hostpins import HostPins
+
 logger = logging.getLogger("ares.agent.tunnel")
 
 _OPEN = 1
@@ -46,7 +48,19 @@ _CLOSE = 5
 _HEADER = struct.Struct(">BQ")
 _RELAY_CHUNK = 65536
 _DIAL_TIMEOUT = 10.0
-_RESOLVE_TIMEOUT = 5.0
+# How long one destination lookup may take on this agent's resolver.
+#
+# 5.0 was too tight and cost a customer hours. glibc walks the nameservers in
+# ``/etc/resolv.conf`` IN ORDER at roughly five seconds each, so a name the FIRST server will not
+# answer only resolves once the resolver falls through to the second: a 5s cap gives up in the
+# middle of that first server's own timeout and never sees the answer that was coming. The host's
+# shell waits it out and succeeds, which is exactly why "but I can curl it from the box" and "the
+# agent says it cannot resolve" were both true at once.
+#
+# 15.0 clears a two-server fallback with margin. It is an upper bound, not a delay: a name that
+# resolves normally still returns in milliseconds, and a name that is genuinely dead still fails
+# fast with NXDOMAIN rather than burning the budget.
+_RESOLVE_TIMEOUT = 15.0
 _RECONNECT_BACKOFF_MIN = 1.0
 _RECONNECT_BACKOFF_MAX = 30.0
 # Startup rehearsal of the data plane (see probe). Bounded so a network that blackholes the
@@ -149,6 +163,54 @@ def is_ip_literal(value: str) -> bool:
     return True
 
 
+# What ares pushes to mean "any hostname, for as long as this stays on the list". It is sent only
+# while an interactive login is parked waiting for a human, and withdrawn the moment that window
+# closes, because a federated sign-in visits hosts nobody can enumerate in advance: the operator's
+# browser is handed to an identity provider, bounced through whatever asset CDNs the login page
+# pulls from, and handed back. Enumerating those was a guessing game the customer always lost.
+#
+# It widens NAMES ONLY. An IP literal is still bounded by the registered networks below, so this
+# can never be used to reach an address the agent was not registered for, and the name is still
+# resolved on this agent's own resolver.
+ANY_HOST = "*"
+
+
+def host_approved(host: str, allowed_hosts: Iterable[str]) -> bool:
+    """Whether ares approved ``host`` for a running assessment.
+
+    Three forms, in the order an operator would expect:
+
+    * ``*`` - any hostname (see :data:`ANY_HOST`).
+    * ``*.example.com`` / ``.example.com`` - that domain and anything under it. Exact-match-only
+      was a silent hole: ares ships ``okta.com``, ``auth0.com``, ``pingone.com`` and friends as
+      built-in identity providers, but every real tenant is ``acme.okta.com``, so none of them ever
+      matched anything and the entries did nothing at all.
+    * anything else - an exact hostname.
+
+    A suffix entry never matches the bare label it is a suffix of by accident: ``.okta.com`` covers
+    ``acme.okta.com`` and ``okta.com``, but never ``notokta.com``.
+    """
+    needle = normalize_host(host)
+    if not needle:
+        return False
+    for raw in allowed_hosts:
+        entry = normalize_host(raw)
+        if not entry:
+            continue
+        if entry == ANY_HOST:
+            return True
+        if entry.startswith("*."):
+            entry = entry[1:]  # "*.example.com" -> ".example.com"
+        if entry.startswith("."):
+            domain = entry.lstrip(".")
+            if domain and (needle == domain or needle.endswith(f".{domain}")):
+                return True
+            continue
+        if needle == entry:
+            return True
+    return False
+
+
 class Refused(Exception):
     """The destination is not authorized for this agent; the message is the log reason."""
 
@@ -226,12 +288,14 @@ class TunnelClient:
         allowed_hosts: set[str],
         *,
         ssl_context: ssl.SSLContext | None,
+        pins: HostPins | None = None,
     ) -> None:
         self._url = url
         self._token = token
         self._ssl_context = ssl_context
         self._allowed = [ipaddress.ip_network(n, strict=False) for n in allowed_networks]
         self._allowed_hosts = allowed_hosts
+        self._pins = pins if pins is not None else HostPins()
         self._writers: dict[int, asyncio.StreamWriter] = {}
         self._ws: websockets.ClientConnection | None = None
         self._refusals = RefusalLog()
@@ -257,7 +321,7 @@ class TunnelClient:
             return host
         addresses = await self._resolve(host, port)
         inside_networks = all(self._in_allowed_networks(a) for a in addresses)
-        approved_by_ares = normalize_host(host) in self._allowed_hosts
+        approved_by_ares = host_approved(host, self._allowed_hosts)
         if inside_networks or approved_by_ares:
             return addresses[0]
         raise Refused(
@@ -267,13 +331,28 @@ class TunnelClient:
         )
 
     async def _resolve(self, host: str, port: int) -> list[str]:
-        """Resolve ``host`` on this agent's resolver; deduplicated, order preserved."""
+        """Addresses for ``host``: a static pin if one exists, else this agent's resolver.
+
+        Deduplicated, order preserved. A pin short-circuits DNS entirely, which is the point: it is
+        what an operator reaches for when the resolver will not answer a name at all.
+        """
+        if pinned := self._pins.lookup(host):
+            return pinned
         try:
             infos = await asyncio.wait_for(
                 asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM),
                 _RESOLVE_TIMEOUT,
             )
-        except (OSError, asyncio.TimeoutError) as exc:
+        except asyncio.TimeoutError as exc:
+            # str(TimeoutError()) is EMPTY, so interpolating the exception the way the OSError arm
+            # does produced "... did not resolve on this agent: " and left the reader staring at a
+            # sentence that stopped at the colon. Say what actually happened instead.
+            raise Refused(
+                f"{host} did not resolve on this agent within {_RESOLVE_TIMEOUT:.0f}s "
+                "(the resolver did not answer; pin it in the host's /etc/hosts or "
+                "ARES_HOST_ALIASES if it never will)"
+            ) from exc
+        except OSError as exc:
             raise Refused(f"{host} did not resolve on this agent: {exc}") from exc
         addresses = list(dict.fromkeys(str(info[4][0]) for info in infos))
         if not addresses:
@@ -386,18 +465,27 @@ class TunnelManager:
         allowed_networks: list[str],
         *,
         ssl_context: ssl.SSLContext | None,
+        pins: HostPins | None = None,
     ) -> None:
         self._url = url
         self._token = token
         self._allowed_networks = allowed_networks
         self._allowed_hosts: set[str] = set()
         self._ssl_context = ssl_context
+        self._pins = pins if pins is not None else HostPins()
         self._task: asyncio.Task[None] | None = None
 
     def sync(self, required: bool, allowed_hosts: Iterable[str] = ()) -> None:
         pushed = {normalize_host(h) for h in allowed_hosts if h and h.strip()}
         if pushed != self._allowed_hosts:
-            logger.info("tunnel hostname destinations: %s", ", ".join(sorted(pushed)) or "none")
+            # name the wildcard for what it means. "tunnel hostname destinations: *" reads like a
+            # formatting bug in a log an operator may be asked to send us.
+            shown = (
+                "any host (interactive login in progress)"
+                if ANY_HOST in pushed
+                else ", ".join(sorted(pushed)) or "none"
+            )
+            logger.info("tunnel hostname destinations: %s", shown)
         self._allowed_hosts.clear()
         self._allowed_hosts.update(pushed)
         running = self._task is not None and not self._task.done()
@@ -423,6 +511,7 @@ class TunnelManager:
                     self._allowed_networks,
                     self._allowed_hosts,
                     ssl_context=self._ssl_context,
+                    pins=self._pins,
                 ).run()
                 backoff = _RECONNECT_BACKOFF_MIN  # clean close; the next reconnect starts fresh
             except asyncio.CancelledError:

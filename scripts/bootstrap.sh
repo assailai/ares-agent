@@ -20,11 +20,11 @@
 set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
-IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.4.0}}"
+IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.5.0}}"
 # The companion updater keeps the agent on the release the dashboard marks current; it is the only
 # component that touches the Docker socket (the agent stays unprivileged). Set ARES_DISABLE_AUTOUPDATE
 # to opt out (change-control-sensitive hosts). Override the image with ARES_UPDATER_IMAGE=<full ref>.
-UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.4.0}}"
+UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.5.0}}"
 CONTAINER_NAME="ares-agent"
 UPDATER_CONTAINER_NAME="ares-updater"
 VOLUME_NAME="ares-agent-data"
@@ -159,7 +159,8 @@ start_container() {
     fi
 
     local var
-    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE ARES_SCAN_SCOPE ARES_CA_BUNDLE; do
+    for var in ARES_URL ARES_NETWORKS ARES_AGENT_NAME ARES_INSECURE ARES_SCAN_SCOPE ARES_CA_BUNDLE \
+               ARES_HOST_ALIASES; do
         [ -n "${!var:-}" ] && run_args+=(-e "$var=${!var}")
     done
     # Trust whatever this host trusts, so a TLS-inspecting network needs no configuration.
@@ -167,6 +168,21 @@ start_container() {
     ca_dir="$(host_ca_dir)"
     if [ -n "$ca_dir" ]; then
         run_args+=(-v "$ca_dir:/host-ca:ro")
+    fi
+    # Resolve whatever this host resolves, for the same reason we trust what it trusts. A container
+    # gets docker's own /etc/hosts even under --network host (host networking shares the network
+    # namespace, not the mount namespace), so a name someone pinned on the machine is invisible to
+    # the agent -- and "I added it to /etc/hosts and nothing changed" is a genuinely hard afternoon
+    # to debug. Mounted read-only and re-read on change, so a later edit needs no recreate.
+    if [ -r /etc/hosts ]; then
+        run_args+=(-v "/etc/hosts:/host-hosts:ro")
+    fi
+    # Extra resolvers, for a host whose own resolver cannot answer an internal name.
+    if [ -n "${ARES_DNS:-}" ]; then
+        local dns
+        for dns in ${ARES_DNS//,/ }; do
+            run_args+=(--dns "$dns")
+        done
     fi
     # --restart=always pairs with the persistence set up in setup_persistence (linger on rootless
     # Podman; the system daemon on Docker), so the agent comes back after logout and reboot.

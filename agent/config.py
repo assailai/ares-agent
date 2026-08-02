@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     # `repr(settings)` or unhandled pydantic validation error. Read it with `.get_secret_value()`.
     token: SecretStr = SecretStr("")
     # Base URL of the Ares control plane.
-    url: str = "https://api.assailai.com"
+    # api.assailai.com never existed (it is NXDOMAIN), so every install that did not set ARES_URL
+    # explicitly failed its very first control-plane call with a DNS error that read like the
+    # customer's network blocking us.
+    url: str = "https://ares.assailai.com"
     # Optional comma-separated CIDRs that override auto-detected internal networks.
     networks: str = ""
     # Optional friendly name shown in the dashboard (defaults to the host's name).
@@ -38,6 +41,13 @@ class Settings(BaseSettings):
     # mounts at /host-ca, plus anything dropped in /certs. Set this only for a root that is in
     # neither, such as an internal CA on a build that never had it installed on the host.
     ca_bundle: str = ""
+    # Static hostname pins, as ``name=address`` pairs separated by commas or spaces, e.g.
+    # "sso.acme.internal=10.1.2.3,portal.acme.internal=10.1.2.4". The escape hatch for a name the
+    # host's resolver will not answer; the agent already reads the host's own /etc/hosts (mounted
+    # at /host-hosts by the install command), so this is only for a pin that is not in there.
+    # A pin supplies an address, never authorization: the result is still checked against the
+    # registered networks / what ares approved. See agent.hostpins.
+    host_aliases: str = ""
 
     # how broadly to scan when ARES_NETWORKS is unset: "supernet16" (default; each attached
     # subnet widened to its enclosing /16), "attached" (interface prefixes only), "rfc1918" (all

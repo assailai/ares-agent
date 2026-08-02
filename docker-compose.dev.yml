@@ -23,7 +23,7 @@ services:
         hard: 65536
     environment:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token}
-      - ARES_URL=${ARES_URL:-https://api.assailai.com}
+      - ARES_URL=${ARES_URL:-https://ares.assailai.com}
       - ARES_INSECURE=${ARES_INSECURE:-false}
       - ARES_NETWORKS=${ARES_NETWORKS:-}
       - ARES_LOG_LEVEL=DEBUG
