@@ -20,11 +20,11 @@
 set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
-IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.5.0}}"
+IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.5.1}}"
 # The companion updater keeps the agent on the release the dashboard marks current; it is the only
 # component that touches the Docker socket (the agent stays unprivileged). Set ARES_DISABLE_AUTOUPDATE
 # to opt out (change-control-sensitive hosts). Override the image with ARES_UPDATER_IMAGE=<full ref>.
-UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.5.0}}"
+UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.5.1}}"
 CONTAINER_NAME="ares-agent"
 UPDATER_CONTAINER_NAME="ares-updater"
 VOLUME_NAME="ares-agent-data"
@@ -174,7 +174,11 @@ start_container() {
     # namespace, not the mount namespace), so a name someone pinned on the machine is invisible to
     # the agent -- and "I added it to /etc/hosts and nothing changed" is a genuinely hard afternoon
     # to debug. Mounted read-only and re-read on change, so a later edit needs no recreate.
-    if [ -r /etc/hosts ]; then
+    #
+    # Linux only, exactly like host_ca_dir: on Docker Desktop the container runs in a VM whose
+    # /etc/hosts is not the Mac's or Windows', and bind-mounting a host system path there needs
+    # file-sharing permission we should not demand of a dev machine (it would fail the run).
+    if [ "$PLATFORM" = "linux" ] && [ -r /etc/hosts ]; then
         run_args+=(-v "/etc/hosts:/host-hosts:ro")
     fi
     # Extra resolvers, for a host whose own resolver cannot answer an internal name.
