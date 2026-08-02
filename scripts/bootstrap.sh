@@ -174,7 +174,11 @@ start_container() {
     # namespace, not the mount namespace), so a name someone pinned on the machine is invisible to
     # the agent -- and "I added it to /etc/hosts and nothing changed" is a genuinely hard afternoon
     # to debug. Mounted read-only and re-read on change, so a later edit needs no recreate.
-    if [ -r /etc/hosts ]; then
+    #
+    # Linux only, exactly like host_ca_dir: on Docker Desktop the container runs in a VM whose
+    # /etc/hosts is not the Mac's or Windows', and bind-mounting a host system path there needs
+    # file-sharing permission we should not demand of a dev machine (it would fail the run).
+    if [ "$PLATFORM" = "linux" ] && [ -r /etc/hosts ]; then
         run_args+=(-v "/etc/hosts:/host-hosts:ro")
     fi
     # Extra resolvers, for a host whose own resolver cannot answer an internal name.
