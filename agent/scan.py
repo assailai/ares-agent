@@ -20,6 +20,8 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
+from agent.identify import IdentityProbe
+
 logger = logging.getLogger("ares.agent.scan")
 
 # curated top ~100 TCP ports for internal networks: web, databases, remote access, file shares,
@@ -68,6 +70,16 @@ _COMMON_SERVICES = {
 
 ProgressCallback = Callable[[int], Awaitable[None]]
 HostsCallback = Callable[[list[dict]], Awaitable[None]]
+IdentityCallback = Callable[[list[dict]], Awaitable[None]]
+
+# Identity probing (phase 3) runs far narrower than the connect sweep: these are handshakes and
+# request/response round trips, not one-packet connects, so the sweep's thousands-wide concurrency
+# would be a burst of real sessions against the customer's estate. It is also the cap that keeps
+# reverse DNS from pinning asyncio's shared thread pool (see agent.identify.reverse_dns).
+IDENTITY_CONCURRENCY = 64
+# Share of a scan's overall budget that phase 3 may spend. Naming is worth having, but never at
+# the cost of the port results themselves: once this is gone, remaining hosts report without it.
+IDENTITY_BUDGET_SHARE = 0.25
 
 
 def _service_for(port: int) -> str:
@@ -171,6 +183,15 @@ class _Scan:
     on_progress: ProgressCallback | None
     on_hosts: HostsCallback | None
     semaphore: asyncio.Semaphore
+    on_identity: IdentityCallback | None = None
+    identity: IdentityProbe | None = None
+    identity_semaphore: asyncio.Semaphore | None = None
+    # Total wall-clock phase 3 may spend across the whole scan, not a point in time: a deadline
+    # measured from the start would give the first chunks identity and silently leave every later
+    # chunk unnamed, which reads as "naming randomly stopped working" rather than as a budget.
+    identity_allowance: float | None = None
+    identity_spent: float = 0.0
+    identity_exhausted: bool = False
     done: int = 0
     last_pct: int = -1
 
@@ -212,6 +233,32 @@ class _Scan:
         await self._advance()
         return hits
 
+    async def _identify(self, ip: str, open_ports: set[int]) -> dict | None:
+        """Phase 3 for one host: gather naming evidence, bounded by the identity semaphore.
+
+        Returns the wire payload, or ``None`` when identity is off, out of budget, or the host
+        said nothing about itself. Never raises: a scan that found services must still report them
+        if naming fails.
+        """
+        if self.identity is None or self.identity_semaphore is None:
+            return None
+        if self.identity_allowance is not None and self.identity_spent >= self.identity_allowance:
+            if not self.identity_exhausted:
+                self.identity_exhausted = True
+                logger.warning(
+                    "Identity budget of %.0fs is spent; remaining hosts are reported without a "
+                    "name. Port results are unaffected.",
+                    self.identity_allowance,
+                )
+            return None
+        try:
+            async with self.identity_semaphore:
+                evidence = await self.identity.run(ip, open_ports)
+        except Exception:  # noqa: BLE001 - naming is an enrichment, never a reason to fail a scan
+            logger.debug("identity probe failed for %s", ip, exc_info=True)
+            return None
+        return None if evidence.is_empty() else evidence.as_payload()
+
     async def run_chunk(self, hosts: list[str]) -> list[dict]:
         results = await asyncio.gather(*(self._discover(ip) for ip in hosts))
         hits = [hit for _, _, open_hits in results for hit in open_hits]
@@ -221,6 +268,26 @@ class _Scan:
             hits.extend(hit for host_hits in swept for hit in host_hits)
         if hits and self.on_hosts is not None:
             await self.on_hosts(sorted(hits, key=lambda d: (d["ip"], d["port"])))
+        # Phase 3 runs after the sweep so it knows each host's open ports, and streams on its own
+        # callback: the port hits above are already on their way, and identity is a later, slower
+        # and entirely optional signal that must not hold them up.
+        if live and self.identity is not None:
+            ports_by_ip: dict[str, set[int]] = {ip: set() for ip in live}
+            for hit in hits:
+                bucket = ports_by_ip.get(hit["ip"])
+                if bucket is not None:
+                    bucket.add(hit["port"])
+            phase_started = time.monotonic()
+            found = await asyncio.gather(
+                *(self._identify(ip, ports_by_ip.get(ip, set())) for ip in live)
+            )
+            # wall clock for the whole phase, not the sum of per-host times: these run concurrently,
+            # so summing them would overcount by roughly the concurrency factor and exhaust the
+            # allowance almost immediately.
+            self.identity_spent += time.monotonic() - phase_started
+            payloads = [p for p in found if p is not None]
+            if payloads and self.on_identity is not None:
+                await self.on_identity(sorted(payloads, key=lambda d: d["ip"]))
         return hits
 
     async def finish(self) -> None:
@@ -242,6 +309,8 @@ async def scan_cidr(
     budget_seconds: float | None = None,
     on_progress: ProgressCallback | None = None,
     on_hosts: HostsCallback | None = None,
+    on_identity: IdentityCallback | None = None,
+    identity: IdentityProbe | None = None,
 ) -> list[dict]:
     """Return discovered ``{ip, port, service, protocol, evidence}`` for open ports in ``cidr``.
 
@@ -249,11 +318,16 @@ async def scan_cidr(
     integer percentage climbs; ``on_hosts(chunk)`` streams newly discovered hosts as each chunk
     finishes. ``budget_seconds`` is an overall soft deadline: once exceeded, no new chunk starts
     and whatever was found so far is returned (partial, logged).
+
+    Passing ``identity`` enables the phase-3 naming pass on live hosts, streamed through
+    ``on_identity(chunk)``. It is bounded separately from the port sweep, both in concurrency and
+    in its share of ``budget_seconds``, so naming can degrade without the scan degrading with it.
     """
     port_list = list(ports) if ports else list(DEFAULT_PORTS)
     disc_list = list(discovery_ports)
     disc_set = set(disc_list)
     chunks, total_hosts = _plan_chunks(cidr, chunk_prefix=chunk_prefix, max_hosts=max_hosts)
+    started = time.monotonic()
     scan = _Scan(
         requested=set(port_list),
         discovery_ports=disc_list,
@@ -268,10 +342,21 @@ async def scan_cidr(
         on_progress=on_progress,
         on_hosts=on_hosts,
         semaphore=asyncio.Semaphore(max(1, concurrency)),
+        on_identity=on_identity,
+        identity=identity,
+        identity_semaphore=(
+            asyncio.Semaphore(min(IDENTITY_CONCURRENCY, max(1, concurrency)))
+            if identity is not None
+            else None
+        ),
+        identity_allowance=(
+            budget_seconds * IDENTITY_BUDGET_SHARE
+            if identity is not None and budget_seconds is not None
+            else None
+        ),
     )
 
     discovered: list[dict] = []
-    started = time.monotonic()
     for index, chunk in enumerate(chunks):
         if budget_seconds is not None and time.monotonic() - started > budget_seconds:
             logger.warning(

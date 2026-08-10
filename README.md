@@ -138,6 +138,34 @@ The agent is configured entirely through environment variables (all prefixed `AR
 | `ARES_HOST_ALIASES` | *(none)* | Static `name=address` pins, comma or space separated, e.g. `sso.acme.internal=10.1.2.3`. Rarely needed: the agent already reads this host's `/etc/hosts` (see [Name resolution](#name-resolution)). Set it only for a pin that is not in there. |
 | `ARES_DNS` | *(none)* | Extra resolvers for the container, comma separated. Read by the install command, not the agent. Only needed when this host's own resolver cannot answer an internal name. |
 
+### Host identification
+
+After the port sweep, the agent asks each live host what it is called, so the dashboard can show
+`esxi-01.corp.local` (VMware ESXi host) instead of `10.1.0.5:443`. It reads the name from this
+host's resolver, this host's `/etc/hosts`, the TLS certificate the device serves, its web page
+title and `Server` header, and its NetBIOS name, and sends those observations to Ares, which
+decides the name and the device type.
+
+Unlike the port sweep, this sends application-layer bytes to your devices, so every source can be
+turned off independently. The HTTP probe is a single unauthenticated `GET /` that never follows a
+redirect and never sends a credential, so it cannot trip an account lockout.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARES_IDENTIFY` | `true` | Master switch for host identification. `false` turns off everything below and restores the previous behaviour exactly. |
+| `ARES_IDENTIFY_REVERSE_DNS` | `true` | Ask this host's resolver for a PTR record per discovered host. |
+| `ARES_IDENTIFY_TLS` | `true` | Read the certificate served on TLS ports. Handshake only; nothing is sent afterwards. |
+| `ARES_IDENTIFY_HTTP` | `true` | One unauthenticated `GET /` on web ports, for the page title and `Server` header. |
+| `ARES_IDENTIFY_NETBIOS` | `true` | A NetBIOS node-status query (UDP 137), which names Windows machines that have no PTR record. |
+| `ARES_IDENTIFY_DNS_TIMEOUT` | `2.0` | Seconds to wait for a PTR answer. |
+| `ARES_IDENTIFY_TLS_TIMEOUT` | `3.0` | Seconds to wait for a TLS handshake. |
+| `ARES_IDENTIFY_HTTP_TIMEOUT` | `3.0` | Seconds to wait for an HTTP response. |
+| `ARES_IDENTIFY_NETBIOS_TIMEOUT` | `1.0` | Seconds to wait for a NetBIOS reply. |
+
+Identification runs once per *live* host (never per open port), under its own concurrency limit,
+and inside a fixed share of the scan's overall time budget. If that share runs out, the remaining
+hosts are reported with their ports and without a name; the port results are never affected.
+
 ### Volume
 
 | Path | Description |

@@ -240,7 +240,7 @@ async def test_run_task_reports_progress_and_streams_hosts(monkeypatch: pytest.M
     async def _task_progress(_s, _t, _task_id, *, percent, discovered_hosts=None, **_kw):
         progress.append((percent, discovered_hosts))
 
-    async def _task_completed(_s, _t, _task_id, hosts):
+    async def _task_completed(_s, _t, _task_id, hosts, **_kw):
         completed.append(hosts)
 
     async def _fake_scan(cidr, ports, **kwargs):
@@ -277,7 +277,7 @@ async def test_run_task_survives_a_failed_progress_post(monkeypatch: pytest.Monk
     async def _boom(*_a, **_k):
         raise RuntimeError("network blip")
 
-    async def _task_completed(_s, _t, _task_id, hosts):
+    async def _task_completed(_s, _t, _task_id, hosts, **_kw):
         completed.append(hosts)
 
     async def _fake_scan(cidr, ports, **kwargs):

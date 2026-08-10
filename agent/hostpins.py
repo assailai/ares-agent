@@ -82,6 +82,27 @@ class HostPins:
         key = host.strip().rstrip(".").lower()
         return self._aliases.get(key) or self._from_file.get(key) or []
 
+    def reverse(self, address: str) -> str | None:
+        """The pinned name for ``address``, or ``None`` when nothing pins it.
+
+        The inverse of :meth:`lookup`, for naming a discovered host: the operator already told us
+        what this address is called when they put it in the host's ``/etc/hosts``, and that is a
+        name the resolver frequently will not answer for. Built on demand rather than kept as a
+        second index, because the pin table is small and this runs once per discovered host.
+
+        When several names pin the same address the shortest wins, which prefers the canonical
+        ``db-01.corp.local`` over a longer alias someone added later.
+        """
+        self._reload_if_changed()
+        target = address.strip()
+        names = [
+            name
+            for table in (self._aliases, self._from_file)
+            for name, addresses in table.items()
+            if target in addresses
+        ]
+        return min(names, key=len) if names else None
+
     def summary(self) -> str:
         """One line for the startup log, so the pin table is never a silent input."""
         parts = []
