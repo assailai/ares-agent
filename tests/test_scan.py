@@ -301,29 +301,57 @@ async def test_a_failing_identity_probe_never_costs_the_port_results(
 
 
 @pytest.mark.asyncio
-async def test_identity_budget_stops_naming_but_not_scanning(
+async def test_naming_runs_once_after_the_whole_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every port result is reported before any name is.
+
+    This is what keeps naming's cost proportional to the number of live hosts instead of the
+    number of /24s. Doing it per chunk serialises it behind the next chunk's sweep, so a /16 pays
+    for it 256 times over; that regression is invisible in the results and only shows up as a scan
+    that takes minutes longer, hence pinning the ordering here.
+    """
+    topology = {("10.0.0.5", 80): "open", ("10.0.1.5", 80): "open", ("10.0.2.5", 80): "open"}
+    monkeypatch.setattr(scan, "_connect", _fake_connect(topology))
+    probe = _StubProbe({ip: {"ptr_name": ip} for ip, _ in topology})
+    order: list[str] = []
+
+    async def _on_hosts(chunk: list[dict]) -> None:
+        order.extend(f"ports:{h['ip']}" for h in chunk)
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        order.extend(f"name:{e['ip']}" for e in chunk)
+
+    await scan_cidr(
+        "10.0.0.0/22",
+        [80],
+        chunk_prefix=24,
+        identity=probe,
+        on_hosts=_on_hosts,
+        on_identity=_on_identity,
+    )
+
+    kinds = [entry.split(":")[0] for entry in order]
+    assert kinds == ["ports"] * 3 + ["name"] * 3, order
+
+
+@pytest.mark.asyncio
+async def test_naming_budget_stops_partway_but_not_the_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # once the identity allowance is spent, later hosts report their ports with no name rather
-    # than the scan itself slowing down or stopping.
-    topology = {("10.0.0.5", 80): "open", ("10.0.1.5", 80): "open"}
+    # once the allowance is spent the remaining hosts report their ports with no name, rather than
+    # the scan itself slowing down or stopping. Batch size of 1 so the budget is checked per host.
+    topology = {("10.0.0.5", 80): "open", ("10.0.0.6", 80): "open", ("10.0.0.7", 80): "open"}
     monkeypatch.setattr(scan, "_connect", _fake_connect(topology))
-    probe = _StubProbe({"10.0.0.5": {"ptr_name": "a"}, "10.0.1.5": {"ptr_name": "b"}}, delay=0.05)
+    monkeypatch.setattr(scan, "_IDENTITY_BATCH", 1)
+    probe = _StubProbe({ip: {"ptr_name": ip} for ip, _ in topology}, delay=0.05)
     identity: list[dict] = []
 
     async def _on_identity(chunk: list[dict]) -> None:
         identity.extend(chunk)
 
-    # a budget whose identity share is smaller than one chunk's probe time, so the first chunk
-    # consumes it and the second gets none.
+    # an allowance smaller than three probes, so naming gives up before the last host
     hits = await scan_cidr(
-        "10.0.0.0/23",
-        [80],
-        chunk_prefix=24,
-        budget_seconds=0.08,
-        identity=probe,
-        on_identity=_on_identity,
+        "10.0.0.0/24", [80], budget_seconds=0.4, identity=probe, on_identity=_on_identity
     )
 
-    assert {h["ip"] for h in hits} == {"10.0.0.5", "10.0.1.5"}  # every port result still reported
-    assert [e["ip"] for e in identity] == ["10.0.0.5"]  # only the first chunk got named
+    assert {h["ip"] for h in hits} == {"10.0.0.5", "10.0.0.6", "10.0.0.7"}  # all ports reported
+    assert 0 < len(identity) < 3, identity  # some named, not all
