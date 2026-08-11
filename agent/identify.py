@@ -41,15 +41,15 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("ares.agent.identify")
 
-# Ports whose certificate is worth reading, in the order we would rather have them. This decides
+# ports whose certificate is worth reading, in the order we would rather have them. This decides
 # which ports get a handshake; ares then prefers the lowest-numbered certificate it received, so
 # the ordering here only matters for what the cap cuts off.
 #
-# Ordered by how likely the certificate carries a real host name rather than a vendor default:
+# ordered by how likely the certificate carries a real host name rather than a vendor default:
 # LDAPS and WinRM are issued to the machine by the domain, whereas VMware's authd on 902 is very
 # often still the shipped self-signed one.
 #
-# Every port here must speak TLS immediately on connect. That is why RDP (3389) is absent despite
+# every port here must speak TLS immediately on connect. That is why RDP (3389) is absent despite
 # being the single most valuable one on a Windows estate: its certificate carries the machine name,
 # but reaching it means sending an X.224 connection request with rdpNegReq and only then upgrading,
 # so a bare ClientHello gets nothing. Same for postgres, MySQL and MSSQL, which negotiate TLS
@@ -68,30 +68,30 @@ TLS_PORTS: tuple[int, ...] = (
     995,
     2379,  # etcd
 )
-# Ports worth one plain GET. Ordered so the canonical web surface wins over an admin sidecar.
+# ports worth one plain GET. Ordered so the canonical web surface wins over an admin sidecar.
 HTTP_PORTS: tuple[int, ...] = (443, 80, 8443, 8080, 8000, 8081, 8888, 5000, 9000, 3000)
-# Ports we treat as speaking TLS when probing over HTTP.
+# ports we treat as speaking TLS when probing over HTTP.
 _HTTPS_PORTS: frozenset[int] = frozenset({443, 8443, 5986, 8006, 5480, 9443})
-# At most this many certificate reads and this many HTTP probes per host, so a host that listens on
+# at most this many certificate reads and this many HTTP probes per host, so a host that listens on
 # everything costs about the same as a host that listens on two things.
 #
-# These caps are about BYTES, not time: every probe for a host runs in one gather, so the host's
+# these caps are about BYTES, not time: every probe for a host runs in one gather, so the host's
 # wall clock is its slowest single timeout no matter how many ports are tried (measured: 3.005s at
 # two ports, 3.015s at six, against a black-holed address). What each extra certificate does cost is
 # roughly 2.2 KiB on a completion report that re-sends every host's evidence.
 #
-# Three certificates rather than two, because the second is what rescues a host whose first port
+# three certificates rather than two, because the second is what rescues a host whose first port
 # serves a vendor default: an appliance answering 443 with "CN=VMware" and 636 with its real name
 # needs both read. Beyond three the odds of a *new* name drop off faster than the bytes do.
 MAX_TLS_PROBES = 3
-# Two GETs is plenty. A page title is the weakest name source we accept and is usually a product
+# two GETs is plenty. A page title is the weakest name source we accept and is usually a product
 # ("VMware ESXi"), so it earns its keep in the device role rather than the name; a third GET is more
 # application-layer traffic into a customer's network for almost no naming gain.
 MAX_HTTP_PROBES = 2
-# Cap on the certificate we ship. A normal leaf is 1-2 KiB; anything past this is a device doing
+# cap on the certificate we ship. A normal leaf is 1-2 KiB; anything past this is a device doing
 # something strange and is not worth the bytes on a report carrying hundreds of hosts.
 MAX_CERT_BYTES = 8192
-# Cap on the response bytes read while looking for a <title>. The tag is in the <head>, so the
+# cap on the response bytes read while looking for a <title>. The tag is in the <head>, so the
 # first few KiB is generous; this bounds a device that streams forever.
 MAX_HTTP_BYTES = 16384
 # NetBIOS name service. UDP, so a network that drops it costs exactly one timeout.
@@ -397,7 +397,7 @@ async def netbios_name(ip: str, *, timeout: float) -> str | None:
         return None
 
 
-# Service labels worth a fallback probe once the curated ports are used up. "unknown" is the
+# service labels worth a fallback probe once the curated ports are used up. "unknown" is the
 # important one: it is what a port gets when the sweep's service table does not list it, which is
 # exactly the shape of somebody publishing a container on 8090.
 _HTTP_WORTHY: frozenset[str] = frozenset(
@@ -406,7 +406,7 @@ _HTTP_WORTHY: frozenset[str] = frozenset(
 # A plaintext HTTP port will never complete a TLS handshake, so it is not worth one. Anything that
 # might be wrapped, or that we could not identify at all, still is.
 _TLS_WORTHY: frozenset[str] = frozenset({"unknown", "https", "https-alt"})
-# Ports that react badly to bytes they did not expect, whatever the sweep decided to call them.
+# ports that react badly to bytes they did not expect, whatever the sweep decided to call them.
 # 9100 is raw JetDirect: it prints what you send it, so a stray GET is a page of garbage on every
 # printer in the estate. It is not in the sweep's port list today, which is exactly why it belongs
 # here rather than in a comment: this stays correct if that list ever grows.
@@ -415,9 +415,9 @@ _NEVER_PROBE: frozenset[int] = frozenset({9100, 515})
 
 def _pick_ports(
     services: dict[int, str],
+    *,
     preferred: tuple[int, ...],
     limit: int,
-    *,
     worthy: frozenset[str],
 ) -> list[int]:
     """Up to ``limit`` ports worth probing on this host, best first.
@@ -486,12 +486,12 @@ class IdentityProbe:
                 logger.debug("hosts-file lookup failed for %s", ip, exc_info=True)
 
         tls_ports = (
-            _pick_ports(services, TLS_PORTS, MAX_TLS_PROBES, worthy=_TLS_WORTHY)
+            _pick_ports(services, preferred=TLS_PORTS, limit=MAX_TLS_PROBES, worthy=_TLS_WORTHY)
             if self.tls
             else []
         )
         http_ports = (
-            _pick_ports(services, HTTP_PORTS, MAX_HTTP_PROBES, worthy=_HTTP_WORTHY)
+            _pick_ports(services, preferred=HTTP_PORTS, limit=MAX_HTTP_PROBES, worthy=_HTTP_WORTHY)
             if self.http
             else []
         )

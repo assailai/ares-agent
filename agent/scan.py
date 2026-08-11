@@ -78,18 +78,18 @@ ProgressCallback = Callable[[int], Awaitable[None]]
 HostsCallback = Callable[[list[dict]], Awaitable[None]]
 IdentityCallback = Callable[[list[dict]], Awaitable[None]]
 
-# Identity probing (phase 3) runs far narrower than the connect sweep: these are handshakes and
+# identity probing (phase 3) runs far narrower than the connect sweep: these are handshakes and
 # request/response round trips, not one-packet connects, so the sweep's thousands-wide concurrency
 # would be a burst of real sessions against the customer's estate. It is also the cap that keeps
 # reverse DNS from pinning asyncio's shared thread pool (see agent.identify.reverse_dns).
 IDENTITY_CONCURRENCY = 64
-# Share of a scan's overall budget that naming may spend. Worth having, but never at the cost of
+# share of a scan's overall budget that naming may spend. Worth having, but never at the cost of
 # the port results themselves: once this is gone, the remaining hosts report without a name.
 IDENTITY_BUDGET_SHARE = 0.25
-# Hosts per streamed batch of names. Matches the concurrency limit, so each batch is one full
+# hosts per streamed batch of names. Matches the concurrency limit, so each batch is one full
 # sweep of the semaphore and names reach the dashboard roughly every round trip.
 _IDENTITY_BATCH = IDENTITY_CONCURRENCY
-# Where the port sweep's progress stops when naming is enabled, leaving the rest of the bar for the
+# where the port sweep's progress stops when naming is enabled, leaving the rest of the bar for the
 # naming pass. Otherwise a scan reports 100% and then keeps working, which reads as stuck.
 _SWEEP_PROGRESS_CEILING = 90
 
@@ -132,6 +132,11 @@ async def _connect(ip: str, port: int, timeout: float) -> str:
     except OSError:
         pass
     return "open"
+
+
+def _naming_progress(*, done: int, total: int) -> int:
+    """Where the bar sits during the naming pass, which owns everything above the sweep's ceiling."""
+    return _SWEEP_PROGRESS_CEILING + int(done * (100 - _SWEEP_PROGRESS_CEILING) / total)
 
 
 def _usable_count(net: ipaddress.IPv4Network) -> int:
@@ -198,7 +203,7 @@ class _Scan:
     on_identity: IdentityCallback | None = None
     identity: IdentityProbe | None = None
     identity_semaphore: asyncio.Semaphore | None = None
-    # Total wall clock the naming pass may spend. A ceiling on the phase, not a deadline measured
+    # total wall clock the naming pass may spend. A ceiling on the phase, not a deadline measured
     # from the start of the scan, which would spend itself on the sweep and leave nothing.
     identity_allowance: float | None = None
     # every live host, its answering ports, and what each port looked like, collected across the
@@ -285,11 +290,11 @@ class _Scan:
         if hits and self.on_hosts is not None:
             await self.on_hosts(sorted(hits, key=lambda d: (d["ip"], d["port"])))
         if self.identity is not None:
-            # Remember what to come back to. Naming deliberately does NOT run here: doing it per
+            # remember what to come back to. Naming deliberately does NOT run here: doing it per
             # chunk serialises it behind the next chunk's sweep, so its cost scales with the number
             # of /24s rather than with the number of live hosts (a /16 pays it 256 times over).
             #
-            # Only hosts with something OPEN, not every host that answered. A host that merely
+            # only hosts with something OPEN, not every host that answered. A host that merely
             # refuses a connection is up, and phase 1 counts that as alive, but it exposes no
             # service for ares to attach a name to, so probing it would spend a PTR and a NetBIOS
             # query on evidence that gets discarded on ingest.
@@ -313,24 +318,29 @@ class _Scan:
         hosts = sorted(self.live_ports)
         started = time.monotonic()
         for index in range(0, len(hosts), _IDENTITY_BATCH):
-            if self.identity_allowance is not None:
-                if time.monotonic() - started >= self.identity_allowance:
-                    logger.warning(
-                        "Naming budget of %.0fs is spent after %d/%d host(s); the rest are "
-                        "reported without a name. Port results are unaffected.",
-                        self.identity_allowance,
-                        index,
-                        len(hosts),
-                    )
-                    break
+            if self._naming_budget_spent(started, done=index, total=len(hosts)):
+                break
             batch = hosts[index : index + _IDENTITY_BATCH]
             found = await asyncio.gather(*(self._identify(ip, self.live_ports[ip]) for ip in batch))
             payloads = [p for p in found if p is not None]
             if payloads and self.on_identity is not None:
                 await self.on_identity(payloads)
-            done = min(index + len(batch), len(hosts))
-            span = 100 - _SWEEP_PROGRESS_CEILING
-            await self._report(_SWEEP_PROGRESS_CEILING + int(done * span / len(hosts)))
+            await self._report(_naming_progress(done=index + len(batch), total=len(hosts)))
+
+    def _naming_budget_spent(self, started: float, *, done: int, total: int) -> bool:
+        """Whether naming has used its allowance, saying so once when it has."""
+        if self.identity_allowance is None:
+            return False
+        if time.monotonic() - started < self.identity_allowance:
+            return False
+        logger.warning(
+            "Naming budget of %.0fs is spent after %d/%d host(s); the rest are reported without a "
+            "name. Port results are unaffected.",
+            self.identity_allowance,
+            done,
+            total,
+        )
+        return True
 
     async def finish(self) -> None:
         # a fully-consumed (or budget-truncated) scan always ends at 100.
