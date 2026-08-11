@@ -291,6 +291,44 @@ async def test_probe_caps_how_many_ports_it_touches(monkeypatch: pytest.MonkeyPa
     assert len(probed) == identify.MAX_TLS_PROBES
 
 
+async def test_a_domain_controller_gets_its_ldaps_certificate_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """636 must survive the cap on a host that also serves web ports.
+
+    A domain controller's LDAPS certificate is issued to the machine by the domain, so it is one of
+    the few that reliably carries a real FQDN. It sits above the web-adjacent ports in the list for
+    that reason, and this pins the consequence rather than the list order itself.
+    """
+    probed: list[int] = []
+
+    async def _cert(ip, port, *, timeout):
+        probed.append(port)
+        return None
+
+    async def _nothing(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(identify, "tls_certificate", _cert)
+    monkeypatch.setattr(identify, "reverse_dns", _nothing)
+    monkeypatch.setattr(identify, "netbios_name", _nothing)
+    monkeypatch.setattr(identify, "http_probe", _nothing)
+
+    await IdentityProbe().run("10.0.0.9", {443, 636, 902, 8006, 5480, 993, 995})
+    assert 636 in probed
+
+
+async def test_ports_that_need_a_protocol_preamble_are_not_probed() -> None:
+    """RDP and the database ports are deliberately absent from the TLS list.
+
+    None of them speak TLS on connect: RDP wants an X.224 connection request first, and postgres,
+    MySQL and MSSQL negotiate through their own protocols. Listing them would send a ClientHello
+    that can only ever fail, so their absence is a decision and not an oversight.
+    """
+    for port in (3389, 5432, 3306, 1433):
+        assert port not in identify.TLS_PORTS
+
+
 async def test_probe_survives_a_source_that_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     # one exploding probe must not cost the evidence its siblings collected.
     async def _boom(*_a, **_k):
