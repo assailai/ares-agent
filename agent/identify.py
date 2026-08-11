@@ -61,9 +61,7 @@ TLS_PORTS: tuple[int, ...] = (
     636,  # LDAPS: a domain controller's own FQDN
     5986,  # WinRM over HTTPS: the machine name
     6443,  # Kubernetes API
-    # 8006 and 5480 are NOT in the sweep's port list, so they never reach this today. Kept because
-    # they are correct the moment that list grows, and flagged because an entry that cannot fire
-    # otherwise reads as coverage we do not have.
+    10250,  # kubelet
     8006,  # Proxmox
     5480,  # vCenter appliance management
     902,  # VMware authd

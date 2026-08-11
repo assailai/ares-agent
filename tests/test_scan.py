@@ -184,6 +184,21 @@ async def test_budget_stops_scanning_early(monkeypatch: pytest.MonkeyPatch) -> N
     assert probed == []  # budget exhausted before any probing began
 
 
+def test_every_swept_port_is_labelled() -> None:
+    """An unlabelled port reads as "unknown", which the naming pass treats as fair game.
+
+    That is the coupling between the two lists: widen the sweep without saying what the new ports
+    are, and the fallback starts sending TLS handshakes and GETs to whatever they turn out to be.
+    A routing daemon or an rlogin service has no business receiving either.
+    """
+    unlabelled = sorted(p for p in scan.TOP_PORTS if p not in scan._COMMON_SERVICES)
+    assert unlabelled == [], f"swept but unlabelled: {unlabelled}"
+
+
+def test_the_sweep_list_has_no_duplicates() -> None:
+    assert len(scan.TOP_PORTS) == len(set(scan.TOP_PORTS))
+
+
 # --- phase 3: identity ---------------------------------------------------------------------------
 
 

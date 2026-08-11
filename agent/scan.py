@@ -30,16 +30,25 @@ from agent.identify import IdentityProbe
 
 logger = logging.getLogger("ares.agent.scan")
 
-# curated top ~100 TCP ports for internal networks: web, databases, remote access, file shares,
+# curated ~120 TCP ports for internal networks: web, databases, remote access, file shares,
 # mail, message queues, admin panels. 3000 covers Juice Shop / Grafana-style dev apps.
+#
+# MUST stay in step with ``_DEFAULT_SCAN_PORTS`` in the ares repo, which is the list actually sent
+# on every task; this one only applies when the server sends none. Nothing checks that across two
+# repositories, so a port added here without being added there simply never gets scanned.
+#
+# Every port added here also needs an entry in ``_COMMON_SERVICES`` below. Without one it is
+# labelled "unknown", and the naming pass treats unknown ports as fair game for a TLS handshake and
+# a GET, which is how a device that should never receive application-layer bytes ends up with some.
 TOP_PORTS: tuple[int, ...] = (
     21, 22, 23, 25, 26, 37, 53, 80, 81, 88, 110, 111, 113, 119, 135, 139, 143, 161, 179, 199,
     389, 427, 443, 444, 445, 465, 513, 514, 515, 543, 544, 548, 554, 587, 623, 631, 636, 873,
     902, 990, 993, 995, 1025, 1080, 1099, 1433, 1521, 1723, 2049, 2082, 2083, 2181, 2222, 2375,
-    2376, 2379, 3000, 3001, 3128, 3268, 3306, 3389, 3690, 4444, 5000, 5001, 5432, 5601, 5672,
-    5900, 5984, 5985, 5986, 6379, 6443, 7001, 8000, 8001, 8008, 8009, 8080, 8081, 8088, 8180,
-    8443, 8500, 8888,
-    9000, 9042, 9092, 9200, 9300, 9418, 10000, 11211, 15672, 27017, 27018, 50000,
+    2376, 2379, 3000, 3001, 3128, 3268, 3306, 3307, 3389, 3690, 4200, 4444, 5000, 5001, 5432,
+    5433, 5480, 5601, 5672, 5900, 5984, 5985, 5986, 6379, 6380, 6443, 7001, 7687, 8000, 8001,
+    8006, 8008, 8009, 8080, 8081, 8086, 8088, 8090, 8123, 8180, 8181, 8443, 8500, 8880, 8888,
+    8983, 9000, 9042, 9090, 9091, 9100, 9160, 9200, 9300, 9418, 9443, 10000, 10250, 11211,
+    15672, 27017, 27018, 27019, 50000,
 )
 # lean liveness set for phase 1: the ports most likely to answer on some host in a range.
 DISCOVERY_PORTS: tuple[int, ...] = (80, 443, 22, 445, 3389, 8080)
@@ -72,6 +81,23 @@ _COMMON_SERVICES = {
     8888: "http-alt", 9000: "http-alt", 9042: "cassandra", 9092: "kafka", 9200: "elasticsearch",
     9300: "elasticsearch", 9418: "git", 10000: "webmin", 11211: "memcached", 15672: "rabbitmq",
     27017: "mongodb", 27018: "mongodb", 50000: "sap",
+    # alternates and second instances of things already above
+    3307: "mysql", 5433: "postgres", 6380: "redis", 9160: "cassandra-thrift", 27019: "mongodb",
+    # datastores and search indexes
+    7687: "neo4j", 8086: "influxdb", 8123: "clickhouse", 8983: "solr",
+    # web and app surfaces people actually publish containers on
+    4200: "http-dev", 8090: "http-alt", 8181: "http-alt", 8880: "http-alt", 9090: "http-alt",
+    9091: "http-alt", 9443: "https-alt",
+    # management planes. jetdirect is labelled so the naming pass leaves it alone: 9100 prints
+    # whatever it is sent, and an unlabelled port is one the fallback would probe.
+    5480: "vmware-vami", 8006: "proxmox", 9100: "jetdirect", 10250: "kubelet",
+    # ports that were swept but never labelled. Left unlabelled they read as "unknown", which the
+    # naming pass takes as an invitation to try a handshake and a GET, and a routing daemon or an
+    # rlogin service has no business receiving either. The genuinely web ones are typed as such so
+    # they still get looked at.
+    26: "smtp-alt", 37: "time", 81: "http-alt", 113: "ident", 119: "nntp", 179: "bgp",
+    199: "smux", 427: "svrloc", 444: "snpp", 513: "rlogin", 543: "klogin", 544: "kshell",
+    1025: "rpc-alt", 2082: "http-alt", 2083: "https-alt",
 }
 
 ProgressCallback = Callable[[int], Awaitable[None]]
