@@ -215,16 +215,20 @@ class _StubEvidence:
 
 
 @pytest.mark.asyncio
-async def test_identity_runs_once_per_live_host_with_its_open_ports(
+async def test_naming_is_per_host_and_only_where_something_is_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # phase 3 is per HOST, not per port hit: a host with three open ports is probed once, and it
-    # is told every port that answered so it can pick which ones are worth a handshake.
+    """One probe per host, told every port that answered, and only for hosts exposing a service.
+
+    10.0.0.9 refuses, which phase 1 correctly counts as alive, but it exposes nothing for ares to
+    attach a name to: a discovered-asset row exists per (host, port), so naming it would spend a
+    PTR and a NetBIOS query on evidence that is dropped on ingest.
+    """
     topology = {
         ("10.0.0.5", 80): "open",
         ("10.0.0.5", 443): "open",
         ("10.0.0.5", 22): "open",
-        ("10.0.0.9", 80): "closed",  # alive but nothing open: still worth naming
+        ("10.0.0.9", 80): "closed",
     }
     monkeypatch.setattr(scan, "_connect", _fake_connect(topology))
     probe = _StubProbe()
@@ -232,9 +236,8 @@ async def test_identity_runs_once_per_live_host_with_its_open_ports(
     await scan_cidr("10.0.0.0/24", [80, 443, 22], identity=probe)
 
     seen = dict(probe.seen)
-    assert set(seen) == {"10.0.0.5", "10.0.0.9"}
-    assert seen["10.0.0.5"] == frozenset({80, 443, 22})
-    assert seen["10.0.0.9"] == frozenset()
+    assert set(seen) == {"10.0.0.5"}
+    assert seen["10.0.0.5"] == frozenset({80, 443, 22})  # one probe, all three ports
 
 
 @pytest.mark.asyncio

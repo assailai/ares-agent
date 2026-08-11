@@ -284,19 +284,20 @@ class _Scan:
         if hits and self.on_hosts is not None:
             await self.on_hosts(sorted(hits, key=lambda d: (d["ip"], d["port"])))
         if self.identity is not None:
-            # remember what to come back to. Naming deliberately does NOT run here: doing it per
+            # Remember what to come back to. Naming deliberately does NOT run here: doing it per
             # chunk serialises it behind the next chunk's sweep, so its cost scales with the number
             # of /24s rather than with the number of live hosts (a /16 pays it 256 times over).
-            for ip in live:
-                self.live_ports.setdefault(ip, set())
+            #
+            # Only hosts with something OPEN, not every host that answered. A host that merely
+            # refuses a connection is up, and phase 1 counts that as alive, but it exposes no
+            # service for ares to attach a name to, so probing it would spend a PTR and a NetBIOS
+            # query on evidence that gets discarded on ingest.
             for hit in hits:
-                bucket = self.live_ports.get(hit["ip"])
-                if bucket is not None:
-                    bucket.add(hit["port"])
+                self.live_ports.setdefault(hit["ip"], set()).add(hit["port"])
         return hits
 
     async def identify_all(self) -> None:
-        """Name every live host the sweep found, in one pass over the whole range.
+        """Name every host the sweep found a service on, in one pass over the whole range.
 
         Run after the sweep rather than inside it, so the cost is set by how many hosts are live
         (a handful of concurrent batches) instead of by how many /24s the range spans. The port
