@@ -37,6 +37,7 @@ import re
 import socket
 import ssl
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("ares.agent.identify")
@@ -467,7 +468,8 @@ class IdentityProbe:
     tls_timeout: float = 3.0
     http_timeout: float = 3.0
     netbios_timeout: float = 1.0
-    hosts_file_lookup: object | None = None  # a callable ip -> name | None
+    # resolves an address to a pinned name (agent.hostpins.HostPins.reverse)
+    hosts_file_lookup: Callable[[str], str | None] | None = None
 
     async def run(self, ip: str, services: dict[int, str]) -> HostEvidence:
         """Collect every enabled source for one host, concurrently.
@@ -481,7 +483,7 @@ class IdentityProbe:
 
         if self.hosts_file_lookup is not None:
             try:
-                evidence.hosts_file_name = self.hosts_file_lookup(ip)  # type: ignore[operator]
+                evidence.hosts_file_name = self.hosts_file_lookup(ip)
             except Exception:  # noqa: BLE001 - a bad pin table must not cost the whole probe
                 logger.debug("hosts-file lookup failed for %s", ip, exc_info=True)
 
