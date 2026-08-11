@@ -228,7 +228,7 @@ async def test_probe_gathers_every_enabled_source(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(identify, "netbios_name", _nb)
 
     probe = IdentityProbe(hosts_file_lookup=lambda ip: "db-01")
-    ev = await probe.run("10.0.0.9", {443, 80, 5432})
+    ev = await probe.run("10.0.0.9", {443: "https", 80: "http", 5432: "postgres"})
 
     assert ev.ip == "10.0.0.9"
     assert ev.ptr_name == "db-01.corp.local"
@@ -266,7 +266,7 @@ async def test_probe_respects_per_source_toggles(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(identify, "netbios_name", _nb)
 
     probe = IdentityProbe(reverse_dns=False, tls=False, http=True, netbios=False)
-    await probe.run("10.0.0.9", {443})
+    await probe.run("10.0.0.9", {443: "https"})
     assert called == ["http"]
 
 
@@ -287,7 +287,7 @@ async def test_probe_caps_how_many_ports_it_touches(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(identify, "http_probe", _nothing)
 
     probe = IdentityProbe()
-    await probe.run("10.0.0.9", set(identify.TLS_PORTS))
+    await probe.run("10.0.0.9", dict.fromkeys(identify.TLS_PORTS, "https"))
     assert len(probed) == identify.MAX_TLS_PROBES
 
 
@@ -314,8 +314,116 @@ async def test_a_domain_controller_gets_its_ldaps_certificate_read(
     monkeypatch.setattr(identify, "netbios_name", _nothing)
     monkeypatch.setattr(identify, "http_probe", _nothing)
 
-    await IdentityProbe().run("10.0.0.9", {443, 636, 902, 8006, 5480, 993, 995})
+    await IdentityProbe().run(
+        "10.0.0.9", dict.fromkeys([443, 636, 902, 8006, 5480, 993, 995], "https")
+    )
     assert 636 in probed
+
+
+async def test_a_container_on_an_arbitrary_port_is_still_probed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """8090 is in no curated list, which is the normal shape of a published container.
+
+    A fixed port list can only describe software running where its authors put it, so leftover
+    budget goes to ports the sweep could not identify.
+    """
+    tls_probed: list[int] = []
+    http_probed: list[int] = []
+
+    async def _cert(ip, port, *, timeout):
+        tls_probed.append(port)
+        return None
+
+    async def _http(ip, port, *, timeout):
+        http_probed.append(port)
+        return None
+
+    async def _nothing(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(identify, "tls_certificate", _cert)
+    monkeypatch.setattr(identify, "http_probe", _http)
+    monkeypatch.setattr(identify, "reverse_dns", _nothing)
+    monkeypatch.setattr(identify, "netbios_name", _nothing)
+
+    await IdentityProbe().run("10.0.0.9", {8090: "unknown", 22: "ssh"})
+
+    assert tls_probed == [8090]
+    assert http_probed == [8090]
+
+
+async def test_ports_the_sweep_identified_as_something_else_are_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a database and a printer's raw port will never yield a name, and sending them
+    # application-layer bytes is traffic aimed at things with no reason to receive it.
+    probed: list[int] = []
+
+    async def _record(ip, port, *, timeout):
+        probed.append(port)
+        return None
+
+    async def _nothing(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(identify, "tls_certificate", _record)
+    monkeypatch.setattr(identify, "http_probe", _record)
+    monkeypatch.setattr(identify, "reverse_dns", _nothing)
+    monkeypatch.setattr(identify, "netbios_name", _nothing)
+
+    await IdentityProbe().run(
+        "10.0.0.9", {5432: "postgres", 3306: "mysql", 9100: "unknown-printer", 22: "ssh"}
+    )
+
+    assert probed == []
+
+
+async def test_a_raw_print_port_is_never_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """9100 prints whatever you send it.
+
+    The sweep does not reach it today, but it is unlabelled, so the day someone widens the port
+    list a stray GET becomes a page of garbage on every printer in the estate. Pinned here rather
+    than left to a comment.
+    """
+    probed: list[int] = []
+
+    async def _record(ip, port, *, timeout):
+        probed.append(port)
+        return None
+
+    async def _nothing(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(identify, "tls_certificate", _record)
+    monkeypatch.setattr(identify, "http_probe", _record)
+    monkeypatch.setattr(identify, "reverse_dns", _nothing)
+    monkeypatch.setattr(identify, "netbios_name", _nothing)
+
+    await IdentityProbe().run("10.0.0.9", {9100: "unknown", 515: "printer"})
+    assert probed == []
+
+
+async def test_a_plaintext_web_port_is_not_given_a_tls_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # port 80 will never complete a handshake, so spending a fallback probe on one is pure waste.
+    tls_probed: list[int] = []
+
+    async def _cert(ip, port, *, timeout):
+        tls_probed.append(port)
+        return None
+
+    async def _nothing(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(identify, "tls_certificate", _cert)
+    monkeypatch.setattr(identify, "http_probe", _nothing)
+    monkeypatch.setattr(identify, "reverse_dns", _nothing)
+    monkeypatch.setattr(identify, "netbios_name", _nothing)
+
+    await IdentityProbe().run("10.0.0.9", {80: "http"})
+    assert tls_probed == []
 
 
 async def test_ports_that_need_a_protocol_preamble_are_not_probed() -> None:
@@ -342,7 +450,7 @@ async def test_probe_survives_a_source_that_raises(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(identify, "http_probe", _boom)
     monkeypatch.setattr(identify, "netbios_name", _nb)
 
-    ev = await IdentityProbe().run("10.0.0.9", {443})
+    ev = await IdentityProbe().run("10.0.0.9", {443: "https"})
     assert ev.ptr_name is None
     assert ev.netbios_name == "WS01"
 
@@ -353,7 +461,7 @@ async def test_probe_survives_a_broken_hosts_file_lookup() -> None:
 
     ev = await IdentityProbe(
         reverse_dns=False, tls=False, http=False, netbios=False, hosts_file_lookup=_boom
-    ).run("10.0.0.9", set())
+    ).run("10.0.0.9", {})
     assert ev.hosts_file_name is None
     assert ev.is_empty()
 

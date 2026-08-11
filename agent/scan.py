@@ -201,9 +201,10 @@ class _Scan:
     # Total wall clock the naming pass may spend. A ceiling on the phase, not a deadline measured
     # from the start of the scan, which would spend itself on the sweep and leave nothing.
     identity_allowance: float | None = None
-    # every live host and the ports that answered on it, collected across the whole sweep so the
-    # naming pass can run once at the end (see identify_all).
-    live_ports: dict[str, set[int]] = field(default_factory=dict)
+    # every live host, its answering ports, and what each port looked like, collected across the
+    # whole sweep so the naming pass can run once at the end (see identify_all). The service label
+    # rides along so naming can tell "a port we could not identify" from "a database".
+    live_ports: dict[str, dict[int, str]] = field(default_factory=dict)
     done: int = 0
     last_pct: int = -1
 
@@ -293,7 +294,7 @@ class _Scan:
             # service for ares to attach a name to, so probing it would spend a PTR and a NetBIOS
             # query on evidence that gets discarded on ingest.
             for hit in hits:
-                self.live_ports.setdefault(hit["ip"], set()).add(hit["port"])
+                self.live_ports.setdefault(hit["ip"], {})[hit["port"]] = hit["service"]
         return hits
 
     async def identify_all(self) -> None:

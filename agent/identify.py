@@ -397,9 +397,49 @@ async def netbios_name(ip: str, *, timeout: float) -> str | None:
         return None
 
 
-def _pick_ports(open_ports: set[int], preferred: tuple[int, ...], limit: int) -> list[int]:
-    """The first ``limit`` of ``preferred`` that are actually open on this host."""
-    return [p for p in preferred if p in open_ports][:limit]
+# Service labels worth a fallback probe once the curated ports are used up. "unknown" is the
+# important one: it is what a port gets when the sweep's service table does not list it, which is
+# exactly the shape of somebody publishing a container on 8090.
+_HTTP_WORTHY: frozenset[str] = frozenset(
+    {"unknown", "http", "https", "http-alt", "http-proxy", "http-dev", "https-alt"}
+)
+# A plaintext HTTP port will never complete a TLS handshake, so it is not worth one. Anything that
+# might be wrapped, or that we could not identify at all, still is.
+_TLS_WORTHY: frozenset[str] = frozenset({"unknown", "https", "https-alt"})
+# Ports that react badly to bytes they did not expect, whatever the sweep decided to call them.
+# 9100 is raw JetDirect: it prints what you send it, so a stray GET is a page of garbage on every
+# printer in the estate. It is not in the sweep's port list today, which is exactly why it belongs
+# here rather than in a comment: this stays correct if that list ever grows.
+_NEVER_PROBE: frozenset[int] = frozenset({9100, 515})
+
+
+def _pick_ports(
+    services: dict[int, str],
+    preferred: tuple[int, ...],
+    limit: int,
+    *,
+    worthy: frozenset[str],
+) -> list[int]:
+    """Up to ``limit`` ports worth probing on this host, best first.
+
+    The curated list comes first, because those ports are where a name is most likely to be. Any
+    budget left over goes to open ports the sweep could not place, lowest first, which is the only
+    way a service on an arbitrary port gets looked at: a fixed list can only ever describe software
+    running where its authors put it, and a published container matches nothing.
+
+    Ports the sweep *did* identify as something else (a database, SSH) are left alone. They will
+    not yield a name, and probing them is application-layer traffic aimed at things with no reason
+    to receive it.
+    """
+    chosen = [p for p in preferred if p in services and p not in _NEVER_PROBE][:limit]
+    if len(chosen) >= limit:
+        return chosen
+    spare = sorted(
+        port
+        for port, service in services.items()
+        if port not in chosen and port not in _NEVER_PROBE and service in worthy
+    )
+    return chosen + spare[: limit - len(chosen)]
 
 
 async def _close(writer: asyncio.StreamWriter) -> None:
@@ -429,8 +469,11 @@ class IdentityProbe:
     netbios_timeout: float = 1.0
     hosts_file_lookup: object | None = None  # a callable ip -> name | None
 
-    async def run(self, ip: str, open_ports: set[int]) -> HostEvidence:
+    async def run(self, ip: str, services: dict[int, str]) -> HostEvidence:
         """Collect every enabled source for one host, concurrently.
+
+        ``services`` is the host's open ports mapped to what the sweep thinks each one is, which is
+        what lets an unclassified port still get looked at (see :func:`_pick_ports`).
 
         A failure in any one source is that source returning ``None``; the others still report.
         """
@@ -442,8 +485,16 @@ class IdentityProbe:
             except Exception:  # noqa: BLE001 - a bad pin table must not cost the whole probe
                 logger.debug("hosts-file lookup failed for %s", ip, exc_info=True)
 
-        tls_ports = _pick_ports(open_ports, TLS_PORTS, MAX_TLS_PROBES) if self.tls else []
-        http_ports = _pick_ports(open_ports, HTTP_PORTS, MAX_HTTP_PROBES) if self.http else []
+        tls_ports = (
+            _pick_ports(services, TLS_PORTS, MAX_TLS_PROBES, worthy=_TLS_WORTHY)
+            if self.tls
+            else []
+        )
+        http_ports = (
+            _pick_ports(services, HTTP_PORTS, MAX_HTTP_PROBES, worthy=_HTTP_WORTHY)
+            if self.http
+            else []
+        )
 
         ptr_task = reverse_dns(ip, timeout=self.dns_timeout) if self.reverse_dns else _none()
         # NBSTAT is asked unconditionally when enabled rather than gated on 137 being open: 137 is
