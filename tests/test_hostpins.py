@@ -90,3 +90,39 @@ def test_an_edit_is_picked_up_without_a_restart(tmp_path) -> None:
 
     assert pins.lookup("second.example.com") == ["10.0.0.2"]
     assert pins.lookup("first.example.com") == ["10.0.0.1"]
+
+
+# --- reverse lookup, for naming a discovered host ------------------------------------------------
+
+
+def test_reverse_names_an_address_from_the_host_file(tmp_path) -> None:
+    path = tmp_path / "hosts"
+    path.write_text("10.1.2.3 sso.acme.internal\n10.1.2.4 db-01.acme.internal db-01\n")
+    pins = HostPins(path=path)
+    assert pins.reverse("10.1.2.3") == "sso.acme.internal"
+
+
+def test_reverse_prefers_the_shortest_name_for_an_address(tmp_path) -> None:
+    # several names pin one address; the short one is the canonical host, the rest are aliases.
+    path = tmp_path / "hosts"
+    path.write_text("10.1.2.4 db-01.acme.internal db-01 db-primary.acme.internal\n")
+    assert HostPins(path=path).reverse("10.1.2.4") == "db-01"
+
+
+def test_reverse_returns_none_for_an_unpinned_address(tmp_path) -> None:
+    path = tmp_path / "hosts"
+    path.write_text("10.1.2.3 sso.acme.internal\n")
+    assert HostPins(path=path).reverse("10.9.9.9") is None
+
+
+def test_reverse_covers_aliases_too(tmp_path) -> None:
+    pins = HostPins(aliases="portal.acme.internal=10.1.2.9", path=tmp_path / "nope")
+    assert pins.reverse("10.1.2.9") == "portal.acme.internal"
+
+
+def test_reverse_never_names_an_address_localhost(tmp_path) -> None:
+    # parse_hosts_file drops the loopback boilerplate, so reverse cannot resurrect it as a "name"
+    # for 127.0.0.1 (which would then be applied to a real discovered host).
+    path = tmp_path / "hosts"
+    path.write_text("127.0.0.1 localhost\n::1 localhost ip6-localhost\n")
+    assert HostPins(path=path).reverse("127.0.0.1") is None

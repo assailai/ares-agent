@@ -29,6 +29,7 @@ class RegistrationRejected(Exception):
 CAPABILITIES = [
     "local_network_scan",  # the TCP-connect discovery scan
     "tunnel_dns",  # resolve a hostname destination locally and dial it through the tunnel
+    "host_identity",  # collect naming evidence (PTR, TLS cert, HTTP, NetBIOS) per live host
 ]
 
 
@@ -130,6 +131,7 @@ async def task_progress(
     *,
     percent: int,
     discovered_hosts: list[dict] | None = None,
+    host_evidence: list[dict] | None = None,
     hosts_scanned: int | None = None,
     hosts_total: int | None = None,
 ) -> None:
@@ -141,6 +143,8 @@ async def task_progress(
     body: dict[str, object] = {"percent": percent}
     if discovered_hosts:
         body["discovered_hosts"] = discovered_hosts
+    if host_evidence:
+        body["host_evidence"] = host_evidence
     if hosts_scanned is not None:
         body["hosts_scanned"] = hosts_scanned
     if hosts_total is not None:
@@ -153,12 +157,25 @@ async def task_progress(
 
 
 async def task_completed(
-    settings: Settings, token: str, task_id: str, discovered_hosts: list[dict]
+    settings: Settings,
+    token: str,
+    task_id: str,
+    discovered_hosts: list[dict],
+    *,
+    host_evidence: list[dict] | None = None,
 ) -> None:
+    """The authoritative end-of-scan report: every service found, plus the naming evidence.
+
+    Both lists are re-sent in full rather than only the delta since the last progress post, because
+    this call is what a server that missed a progress report reconciles against; the server dedups.
+    """
+    body: dict[str, object] = {"discovered_hosts": discovered_hosts}
+    if host_evidence:
+        body["host_evidence"] = host_evidence
     async with _client(settings) as client:
         resp = await client.post(
             f"/api/v1/agent/tasks/{task_id}/complete",
-            json={"discovered_hosts": discovered_hosts},
+            json=body,
             headers=_auth(token),
         )
     resp.raise_for_status()

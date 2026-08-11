@@ -66,6 +66,30 @@ class Settings(BaseSettings):
     # safety ceiling on hosts scanned per task; truncation beyond this is logged, never silent.
     scan_max_hosts: int = 262_144
 
+    # After the port sweep, ask each live host what it is called (reverse DNS, the host file, the
+    # TLS certificate it serves, its web title, its NetBIOS name), so the dashboard can show
+    # "esxi-01.corp.local" instead of an address. See agent.identify.
+    #
+    # Unlike the sweep, this sends application-layer bytes into the network, so every source is
+    # separately disableable: an estate with fragile devices (OT controllers, older printers) can
+    # keep the parts it trusts and turn off the rest, or set ARES_IDENTIFY=false for none of it.
+    identify: bool = True
+    # Ask the customer's resolver for a PTR record per live host.
+    identify_reverse_dns: bool = True
+    # Read the certificate served on TLS ports. Handshake only; nothing is sent afterwards.
+    identify_tls: bool = True
+    # One unauthenticated GET / on web ports, for the page title and Server header. Never sends a
+    # credential and never follows a redirect, so it cannot trip a lockout.
+    identify_http: bool = True
+    # A NetBIOS node-status query (UDP 137), which names Windows machines that have no PTR.
+    identify_netbios: bool = True
+    # Per-source timeouts. Kept short: on a live LAN these all answer in milliseconds, and the
+    # value only decides how long a host that will never answer costs us.
+    identify_dns_timeout: float = 2.0
+    identify_tls_timeout: float = 3.0
+    identify_http_timeout: float = 3.0
+    identify_netbios_timeout: float = 1.0
+
     # If the agent cannot successfully reach Ares (heartbeat or task poll) for this long, it exits
     # so the container runtime restarts it fresh: a new process re-resolves DNS and rebuilds its
     # client, recovering from a wedged / network-isolated state that in-loop retries cannot (e.g. a

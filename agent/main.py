@@ -25,6 +25,7 @@ from agent import control_plane, netdetect, scan, tlsconf
 from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.hostpins import HostPins
+from agent.identify import IdentityProbe
 from agent.state import AgentState, load_state, save_state
 from agent.tunnel import (
     TunnelManager,
@@ -46,6 +47,10 @@ class _AuthInvalidated(Exception):
 # scan concurrency resolved at startup against the file-descriptor budget (see
 # _resolve_scan_limits); per-connect timeouts + range breadth come from settings.
 _scan_limits = {"concurrency": 512}
+# The pin table built at startup, shared with the identity phase so a discovered address can be
+# named from the host's own /etc/hosts. Module-level for the same reason as _scan_limits: a scan
+# task is driven by the poll loop and does not carry run()'s locals.
+_host_pins: HostPins | None = None
 # file-descriptor target so high scan concurrency has enough sockets (headroom left for the
 # control-plane client and the data-plane tunnel).
 _FD_TARGET = 65536
@@ -344,6 +349,28 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
         await asyncio.sleep(_cadence["heartbeat"])
 
 
+def _identity_probe() -> IdentityProbe | None:
+    """The configured phase-3 naming probe, or ``None`` when the operator turned it off.
+
+    Returning ``None`` rather than an all-sources-disabled probe matters: ``scan_cidr`` skips the
+    whole phase on ``None``, so a disabled probe costs nothing at all instead of one no-op pass
+    per live host.
+    """
+    if not settings.identify:
+        return None
+    return IdentityProbe(
+        reverse_dns=settings.identify_reverse_dns,
+        tls=settings.identify_tls,
+        http=settings.identify_http,
+        netbios=settings.identify_netbios,
+        dns_timeout=settings.identify_dns_timeout,
+        tls_timeout=settings.identify_tls_timeout,
+        http_timeout=settings.identify_http_timeout,
+        netbios_timeout=settings.identify_netbios_timeout,
+        hosts_file_lookup=_host_pins.reverse if _host_pins is not None else None,
+    )
+
+
 async def _run_task(token: str, task: dict) -> None:
     task_id = task["id"]
     cidr = task.get("target_network")
@@ -356,13 +383,25 @@ async def _run_task(token: str, task: dict) -> None:
     await control_plane.task_started(settings, token, task_id)
 
     last_pct = 0
+    # Accumulated so the completion report carries every host's identity, not only the last
+    # chunk's: a progress post can be dropped, and complete is what the server reconciles against.
+    identity_seen: dict[str, dict] = {}
 
-    async def _report(percent: int, hosts: list[dict] | None = None) -> None:
+    async def _report(
+        percent: int,
+        hosts: list[dict] | None = None,
+        evidence: list[dict] | None = None,
+    ) -> None:
         # best-effort: progress + streamed hosts are a live-UX nicety, never allowed to fail the
         # scan. task_completed sends the authoritative full list, and the server de-dups it.
         try:
             await control_plane.task_progress(
-                settings, token, task_id, percent=percent, discovered_hosts=hosts
+                settings,
+                token,
+                task_id,
+                percent=percent,
+                discovered_hosts=hosts,
+                host_evidence=evidence,
             )
         except Exception as exc:  # noqa: BLE001 - a dropped progress post is not fatal
             logger.debug("progress report for task %s failed: %s", task_id, exc)
@@ -374,6 +413,11 @@ async def _run_task(token: str, task: dict) -> None:
 
     async def _on_hosts(chunk: list[dict]) -> None:
         await _report(last_pct, chunk)
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        for item in chunk:
+            identity_seen[item["ip"]] = item
+        await _report(last_pct, None, chunk)
 
     try:
         logger.info("Scanning %s across %d port(s)", cidr, len(ports))
@@ -388,9 +432,16 @@ async def _run_task(token: str, task: dict) -> None:
             budget_seconds=budget,
             on_progress=_on_progress,
             on_hosts=_on_hosts,
+            on_identity=_on_identity,
+            identity=_identity_probe(),
         )
-        await control_plane.task_completed(settings, token, task_id, hosts)
-        logger.info("Reported %d discovered host(s) for %s", len(hosts), cidr)
+        evidence = sorted(identity_seen.values(), key=lambda d: d["ip"])
+        await control_plane.task_completed(
+            settings, token, task_id, hosts, host_evidence=evidence
+        )
+        logger.info(
+            "Reported %d discovered host(s) for %s (%d named)", len(hosts), cidr, len(evidence)
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - report any scan failure instead of dropping the task
@@ -521,7 +572,9 @@ async def run() -> int:
     logger.info("TLS trust: %s", trust.summary())
     # Same reasoning as the TLS line above: a pin silently not being picked up is exactly the
     # failure that wastes an afternoon, so say what we loaded before anything can depend on it.
+    global _host_pins
     pins = HostPins(aliases=settings.host_aliases)
+    _host_pins = pins
     logger.info("Host pins: %s", pins.summary())
     networks = settings.network_overrides() or netdetect.scan_targets(settings.scan_scope)
     if not networks:

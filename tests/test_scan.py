@@ -182,3 +182,194 @@ async def test_budget_stops_scanning_early(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert hits == []
     assert probed == []  # budget exhausted before any probing began
+
+
+def test_every_swept_port_is_labelled() -> None:
+    """An unlabelled port reads as "unknown", which the naming pass treats as fair game.
+
+    That is the coupling between the two lists: widen the sweep without saying what the new ports
+    are, and the fallback starts sending TLS handshakes and GETs to whatever they turn out to be.
+    A routing daemon or an rlogin service has no business receiving either.
+    """
+    unlabelled = sorted(p for p in scan.TOP_PORTS if p not in scan._COMMON_SERVICES)
+    assert unlabelled == [], f"swept but unlabelled: {unlabelled}"
+
+
+def test_the_sweep_list_has_no_duplicates() -> None:
+    assert len(scan.TOP_PORTS) == len(set(scan.TOP_PORTS))
+
+
+# --- phase 3: identity ---------------------------------------------------------------------------
+
+
+class _StubProbe:
+    """Stands in for IdentityProbe: records what it was asked, returns scripted evidence."""
+
+    def __init__(self, evidence: dict[str, dict] | None = None, delay: float = 0.0) -> None:
+        self.seen: list[tuple[str, frozenset[int]]] = []
+        self._evidence = evidence or {}
+        self._delay = delay
+
+    async def run(self, ip: str, open_ports: set[int]):
+        self.seen.append((ip, frozenset(open_ports)))
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        return _StubEvidence(ip, self._evidence.get(ip))
+
+
+class _StubEvidence:
+    def __init__(self, ip: str, payload: dict | None) -> None:
+        self._ip = ip
+        self._payload = payload
+
+    def is_empty(self) -> bool:
+        return self._payload is None
+
+    def as_payload(self) -> dict:
+        return {"ip": self._ip, **(self._payload or {})}
+
+
+@pytest.mark.asyncio
+async def test_naming_is_per_host_and_only_where_something_is_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One probe per host, told every port that answered, and only for hosts exposing a service.
+
+    10.0.0.9 refuses, which phase 1 correctly counts as alive, but it exposes nothing for ares to
+    attach a name to: a discovered-asset row exists per (host, port), so naming it would spend a
+    PTR and a NetBIOS query on evidence that is dropped on ingest.
+    """
+    topology = {
+        ("10.0.0.5", 80): "open",
+        ("10.0.0.5", 443): "open",
+        ("10.0.0.5", 22): "open",
+        ("10.0.0.9", 80): "closed",
+    }
+    monkeypatch.setattr(scan, "_connect", _fake_connect(topology))
+    probe = _StubProbe()
+
+    await scan_cidr("10.0.0.0/24", [80, 443, 22], identity=probe)
+
+    seen = dict(probe.seen)
+    assert set(seen) == {"10.0.0.5"}
+    assert seen["10.0.0.5"] == frozenset({80, 443, 22})  # one probe, all three ports
+
+
+@pytest.mark.asyncio
+async def test_identity_is_streamed_on_its_own_callback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # naming rides a separate callback from the port hits: the hits are already on their way and
+    # must not wait for a slower, entirely optional signal.
+    monkeypatch.setattr(scan, "_connect", _fake_connect({("10.0.0.5", 80): "open"}))
+    probe = _StubProbe({"10.0.0.5": {"ptr_name": "web-01.corp"}})
+    hosts: list[dict] = []
+    identity: list[dict] = []
+
+    async def _on_hosts(chunk: list[dict]) -> None:
+        hosts.extend(chunk)
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        identity.extend(chunk)
+
+    await scan_cidr(
+        "10.0.0.0/24", [80], identity=probe, on_hosts=_on_hosts, on_identity=_on_identity
+    )
+
+    assert [h["ip"] for h in hosts] == ["10.0.0.5"]
+    assert identity == [{"ip": "10.0.0.5", "ptr_name": "web-01.corp"}]
+
+
+@pytest.mark.asyncio
+async def test_hosts_that_say_nothing_are_not_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    # empty evidence is not worth a row on a report that already carries hundreds of hosts.
+    monkeypatch.setattr(scan, "_connect", _fake_connect({("10.0.0.5", 80): "open"}))
+    identity: list[dict] = []
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        identity.extend(chunk)
+
+    await scan_cidr("10.0.0.0/24", [80], identity=_StubProbe(), on_identity=_on_identity)
+    assert identity == []
+
+
+@pytest.mark.asyncio
+async def test_no_identity_probe_means_no_phase_three(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the default, and an agent with ARES_IDENTIFY=false, must behave exactly as before.
+    monkeypatch.setattr(scan, "_connect", _fake_connect({("10.0.0.5", 80): "open"}))
+    identity: list[dict] = []
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        identity.extend(chunk)
+
+    hits = await scan_cidr("10.0.0.0/24", [80], on_identity=_on_identity)
+    assert [h["ip"] for h in hits] == ["10.0.0.5"]
+    assert identity == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_identity_probe_never_costs_the_port_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Exploding:
+        async def run(self, ip: str, open_ports: set[int]):
+            raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(scan, "_connect", _fake_connect({("10.0.0.5", 80): "open"}))
+    hits = await scan_cidr("10.0.0.0/24", [80], identity=_Exploding())
+    assert [(h["ip"], h["port"]) for h in hits] == [("10.0.0.5", 80)]
+
+
+@pytest.mark.asyncio
+async def test_naming_runs_once_after_the_whole_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every port result is reported before any name is.
+
+    This is what keeps naming's cost proportional to the number of live hosts instead of the
+    number of /24s. Doing it per chunk serialises it behind the next chunk's sweep, so a /16 pays
+    for it 256 times over; that regression is invisible in the results and only shows up as a scan
+    that takes minutes longer, hence pinning the ordering here.
+    """
+    topology = {("10.0.0.5", 80): "open", ("10.0.1.5", 80): "open", ("10.0.2.5", 80): "open"}
+    monkeypatch.setattr(scan, "_connect", _fake_connect(topology))
+    probe = _StubProbe({ip: {"ptr_name": ip} for ip, _ in topology})
+    order: list[str] = []
+
+    async def _on_hosts(chunk: list[dict]) -> None:
+        order.extend(f"ports:{h['ip']}" for h in chunk)
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        order.extend(f"name:{e['ip']}" for e in chunk)
+
+    await scan_cidr(
+        "10.0.0.0/22",
+        [80],
+        chunk_prefix=24,
+        identity=probe,
+        on_hosts=_on_hosts,
+        on_identity=_on_identity,
+    )
+
+    kinds = [entry.split(":")[0] for entry in order]
+    assert kinds == ["ports"] * 3 + ["name"] * 3, order
+
+
+@pytest.mark.asyncio
+async def test_naming_budget_stops_partway_but_not_the_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # once the allowance is spent the remaining hosts report their ports with no name, rather than
+    # the scan itself slowing down or stopping. Batch size of 1 so the budget is checked per host.
+    topology = {("10.0.0.5", 80): "open", ("10.0.0.6", 80): "open", ("10.0.0.7", 80): "open"}
+    monkeypatch.setattr(scan, "_connect", _fake_connect(topology))
+    monkeypatch.setattr(scan, "_IDENTITY_BATCH", 1)
+    probe = _StubProbe({ip: {"ptr_name": ip} for ip, _ in topology}, delay=0.05)
+    identity: list[dict] = []
+
+    async def _on_identity(chunk: list[dict]) -> None:
+        identity.extend(chunk)
+
+    # an allowance smaller than three probes, so naming gives up before the last host
+    hits = await scan_cidr(
+        "10.0.0.0/24", [80], budget_seconds=0.4, identity=probe, on_identity=_on_identity
+    )
+
+    assert {h["ip"] for h in hits} == {"10.0.0.5", "10.0.0.6", "10.0.0.7"}  # all ports reported
+    assert 0 < len(identity) < 3, identity  # some named, not all
