@@ -70,9 +70,13 @@ Watch it enroll and come online:
 
 ```bash
 docker logs -f ares-agent
-# ... Registered as agent <id>
-# ... Agent online, visible in the dashboard as "<name>".
+# ... Registered as agent <id> ("<name>")
+# ... Agent online as "<name>" (agent <id>).
 ```
+
+The name and id on that last line are the ones **Ares** holds for this agent, not the
+`ARES_AGENT_NAME` you passed in, so it is the line to check when you want to be sure a host
+enrolled as the agent you meant it to.
 
 Images are published to Docker Hub: `assailai/ares-agent` and `assailai/ares-updater` (the companion updater), tagged per release.
 
@@ -314,6 +318,20 @@ docker pull assailai/ares-agent:<new-version>
 
 Or with Compose: bump the pinned `image:` tag, then `docker compose pull && docker compose up -d`.
 
+### Re-installing over an existing agent
+
+Reusing the volume keeps the identity, which is what makes an upgrade an upgrade rather than a
+second agent. The agent decides from the `ARES_TOKEN` it is handed:
+
+- **The same token it enrolled with** (an upgrade, or the auto-update companion recreating the
+  container) - it keeps its identity and makes no registration call at all.
+- **A registration token for a different agent** - it enrols under that one and logs
+  `Re-enrolled as a new agent <id>`. The previous identity stops heartbeating and goes offline
+  in the dashboard.
+- **A token that is already spent** - it cannot become a new agent, so it keeps the identity it
+  has and says so (`Keeping the existing agent identity`) rather than quietly carrying on as the
+  wrong agent. Generate a fresh token, or discard the identity with `ARES_RESET=1`.
+
 ### Auto-update (the companion updater)
 
 The deployment bundles a small `ares-updater` companion that keeps the agent on the version you
@@ -364,6 +382,8 @@ Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 | `Preflight: data-plane tunnel FAILED` | The agent can reach Ares but not open the tunnel that hunts run over, so it is online but cannot assess your internal network. The message names the likely cause. An HTTP status where a `101` belongs means something refused the upgrade rather than blocking the connection: allow WebSocket upgrades to your Ares host. The agent keeps running and retries when a hunt starts. |
 | `No internal LAN auto-detected` | Auto-detection found nothing scannable. Set `ARES_NETWORKS=10.0.0.0/24,...` or edit the networks in the dashboard. |
 | `Heartbeat unauthorized` | The stored agent credentials were rejected (a decommissioned agent, or stale credentials from a kept `/data` volume). After a few consecutive rejections the agent tries to re-enroll with `ARES_TOKEN`: if the token is still unused it adopts a fresh identity and recovers; if the token is spent it keeps the current credentials and retries (it does not exit or wipe anything), so a decommissioned agent idles quietly. To give such an agent a new identity, redeploy with a fresh token. |
+| `Keeping the existing agent identity` | You re-installed on a host that is already enrolled, with a registration token that is already spent, so this host stayed the agent it already was. Nothing was lost: it keeps serving under the identity it has. Generate a fresh token in Settings -> Agents, or re-run the installer with `ARES_RESET=1` to discard the stored identity first. See [Re-installing over an existing agent](#re-installing-over-an-existing-agent). |
+| `Ares knows this agent as "..." which differs from ARES_AGENT_NAME` | Harmless when the name came from the deploy wizard (which overrides `ARES_AGENT_NAME` at enrollment) or was changed in the dashboard. If you meant to install a *new* agent on this host, it means the container is serving on an earlier enrollment - re-run the installer with a fresh token, or with `ARES_RESET=1`. |
 
 **Health check.** The container is healthy once it has registered, which is when
 `/data/agent-state.json` exists:
@@ -372,11 +392,18 @@ Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 docker exec ares-agent test -f /data/agent-state.json && echo "registered"
 ```
 
-**Complete reset** (you'll need a new registration token):
+**Complete reset** (you'll need a new registration token). The updater has to go too: it mounts
+the same volume, and the engine will not remove a volume any container still references.
 
 ```bash
-docker rm -f ares-agent
+docker rm -f ares-agent ares-updater
 docker volume rm ares-agent-data
+```
+
+Or let the installer do it, which is the same thing plus a clean re-enrollment:
+
+```bash
+ARES_RESET=1 ARES_TOKEN=<fresh-token> bash <(curl -fsSL https://raw.githubusercontent.com/assailai/ares-agent/main/scripts/bootstrap.sh)
 ```
 
 ## Versioning

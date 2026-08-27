@@ -15,16 +15,21 @@
 #
 # Optional env (passed through to the container when set): ARES_URL,
 # ARES_NETWORKS, ARES_AGENT_NAME, ARES_INSECURE, ARES_SCAN_SCOPE.
+#
+# Re-installing over an existing agent replaces the containers but keeps the data volume, which
+# holds the agent's identity. Handed a registration token for a *different* agent, the agent
+# re-enrolls under it by itself; set ARES_RESET=1 to discard the stored identity up front instead,
+# for the case it cannot fix (the token is already spent).
 # =============================================================================
 
 set -euo pipefail
 
 # Defaults to the current pinned release; override with ARES_VERSION=X.Y.Z or ARES_IMAGE=<full ref>.
-IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.6.0}}"
+IMAGE="${ARES_IMAGE:-assailai/ares-agent:${ARES_VERSION:-3.7.0}}"
 # The companion updater keeps the agent on the release the dashboard marks current; it is the only
 # component that touches the Docker socket (the agent stays unprivileged). Set ARES_DISABLE_AUTOUPDATE
 # to opt out (change-control-sensitive hosts). Override the image with ARES_UPDATER_IMAGE=<full ref>.
-UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.6.0}}"
+UPDATER_IMAGE="${ARES_UPDATER_IMAGE:-assailai/ares-updater:${ARES_VERSION:-3.7.0}}"
 CONTAINER_NAME="ares-agent"
 UPDATER_CONTAINER_NAME="ares-updater"
 VOLUME_NAME="ares-agent-data"
@@ -113,6 +118,32 @@ replace_existing() {
     "$RUNTIME" ps -a --format '{{.Names}}' | grep -q "^${name}$" || return 0
     warn "A container named '${name}' already exists; replacing it (the data volume is kept)."
     "$RUNTIME" rm -f "$name" >/dev/null 2>&1 || true
+}
+
+reset_state() {
+    # Opt-in hard reset: throw away the agent's stored identity so the next start enrolls from
+    # scratch. Deliberately not the default. Keeping the volume across a re-install is what lets
+    # an agent survive being recreated, and the agent now re-enrolls on its own when it is handed
+    # a registration token it was not minted from. This is the escape hatch for the one case it
+    # cannot fix by itself: the supplied token is already spent, and the operator wants this host
+    # to become a new agent regardless.
+    [ -n "${ARES_RESET:-}" ] || return 0
+    step "Discarding the stored agent identity (ARES_RESET)"
+    # Both containers first: the updater mounts the same volume read-only, and the engine refuses
+    # to remove a volume any container still references, however stopped it is.
+    "$RUNTIME" rm -f "$CONTAINER_NAME" "$UPDATER_CONTAINER_NAME" >/dev/null 2>&1 || true
+    if ! "$RUNTIME" volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
+        info "There was no '${VOLUME_NAME}' volume; this host enrolls from scratch anyway."
+        return 0
+    fi
+    # Fail loudly rather than carry on: continuing here would start the agent on the very
+    # identity the operator just asked to be rid of, which is the failure this flag exists for.
+    if ! "$RUNTIME" volume rm "$VOLUME_NAME" >/dev/null 2>&1; then
+        error "Could not remove the data volume '${VOLUME_NAME}'; something else still uses it."
+        error "Find it with: $RUNTIME ps -a --filter volume=${VOLUME_NAME}"
+        exit 1
+    fi
+    warn "Discarded '${VOLUME_NAME}'. The agent enrolls as a new agent and loses its old identity."
 }
 
 # Echo this host's CA directory, or nothing when there is none to hand over.
@@ -243,8 +274,26 @@ wait_until_online() {
         fi
         logs="$("$RUNTIME" logs "$CONTAINER_NAME" 2>&1 || true)"
         case "$logs" in
+            # Checked ahead of "Agent online", which is also in the log by now: the agent IS
+            # online, just as the agent it already was. Reporting that as a success is exactly how
+            # a re-install used to look like it had worked while the new agent sat at "Offline".
+            *"Keeping the existing agent identity"*)
+                printf "\n"
+                error "This host stayed enrolled as the agent it already was: the token you supplied is already spent, so it could not enrol as a new one."
+                error "Generate a fresh token in the dashboard (Settings -> Agents), or re-run this installer with ARES_RESET=1 to discard the stored identity first."
+                warn  "Nothing was taken down - the existing agent is still running and healthy."
+                exit 1 ;;
             *"Agent online"*)
-                printf "\n"; info "The agent is online."; return 0 ;;
+                printf "\n"
+                case "$logs" in
+                    *"Re-enrolled as a new agent"*)
+                        info "This host was already enrolled; it has re-enrolled as the new agent, and the previous one goes offline." ;;
+                esac
+                case "$logs" in
+                    *"differs from ARES_AGENT_NAME"*)
+                        warn "Ares knows this agent by a different name than ARES_AGENT_NAME asked for. If you meant to install a new agent here, see: $RUNTIME logs $CONTAINER_NAME" ;;
+                esac
+                info "The agent is online."; return 0 ;;
             *"Registration token rejected"*)
                 printf "\n"; error "The registration token was rejected (expired or already used). Generate a fresh one in the dashboard."; exit 1 ;;
             *"Refusing to start"*)
@@ -270,6 +319,9 @@ print_summary() {
     if [ -z "${ARES_DISABLE_AUTOUPDATE:-}" ]; then
         info "  $RUNTIME logs -f ares-updater   follow the auto-update companion"
     fi
+    printf "\n"
+    info "Re-running this installer keeps the agent's identity. To make this host a *new* agent,"
+    info "re-run it with a fresh token, or with ARES_RESET=1 to discard the stored identity."
 }
 
 main() {
@@ -278,6 +330,7 @@ main() {
     check_runtime
     resolve_token "$@"
     setup_persistence
+    reset_state
     start_container
     start_updater
     wait_until_online
