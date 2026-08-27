@@ -1,13 +1,16 @@
-"""Control-plane loop resilience: failure logging is visible but never spammy, the
-agent only claims to be online once a beat is accepted, and a sustained authorization
-failure re-enrolls (non-destructively) instead of 401-looping forever or stranding a
-healthy agent on a spent one-time token."""
+"""Control-plane loop resilience and which identity a start serves under: failure logging is
+visible but never spammy, the agent only claims to be online once a beat is accepted (and under
+the name ares actually holds for it), a sustained authorization failure re-enrolls
+(non-destructively) instead of 401-looping forever or stranding a healthy agent on a spent
+one-time token, and a re-install handed a *different* registration token enrolls under it rather
+than silently going on as the agent it already was."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from pathlib import Path
 from unittest.mock import Mock
 
 import httpx
@@ -15,7 +18,7 @@ import pytest
 from pydantic import SecretStr
 
 from agent import main
-from agent.state import AgentState
+from agent.state import AgentState, fingerprint, load_state, save_state
 
 
 def test_repeated_failure_logging_escalates_then_quiets(caplog: pytest.LogCaptureFixture) -> None:
@@ -477,3 +480,235 @@ def test_the_enrollment_token_never_renders_in_a_log_or_repr() -> None:
     assert "super-secret-enrollment-token" not in f"{settings.token}"
     # ...but the real value is still reachable where it is genuinely needed.
     assert settings.token.get_secret_value() == "super-secret-enrollment-token"
+
+
+# --- which identity a start serves under --------------------------------------------------------
+#
+# The bug these cover: the agent used to short-circuit on any stored identity, so re-installing on
+# a host whose /data volume was kept discarded the supplied ARES_TOKEN without a word. The
+# container went on heartbeating as the old agent while the newly provisioned one sat at
+# "Offline, never" in the dashboard, and both the agent log and the installer called it a success.
+
+
+def _already_enrolled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    supplied: str,
+    minted_with: str | None,
+) -> AgentState:
+    """Put a registered identity on disk, as a kept /data volume would hold it.
+
+    ``supplied`` is the ARES_TOKEN this start is handed; ``minted_with`` is the registration token
+    the stored identity was enrolled with, or None for a state file written by an agent that
+    predates the fingerprint.
+    """
+    state = AgentState(
+        agent_id="already-here",
+        agent_token="agtk-already-here",
+        registration_token_fingerprint=fingerprint(minted_with) if minted_with else None,
+    )
+    monkeypatch.setattr(main.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(main.settings, "token", SecretStr(supplied))
+    save_state(main.settings.state_path, state)
+    return state
+
+
+def _record_register(
+    monkeypatch: pytest.MonkeyPatch, *, result: AgentState | Exception
+) -> list[list[str]]:
+    """Patch _register to record the networks it was called with and then produce ``result``."""
+    calls: list[list[str]] = []
+
+    async def _register(_state: AgentState, networks: list[str]) -> AgentState:
+        calls.append(networks)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(main, "_register", _register)
+    return calls
+
+
+async def test_a_restart_with_the_same_token_keeps_its_identity_and_never_registers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The most important case to get wrong quietly. The auto-update companion recreates the
+    # container with Config.Env copied verbatim, so the same ARES_TOKEN comes back on every
+    # version bump: a register call here would mint a duplicate agent each time a fleet upgrades.
+    _already_enrolled(monkeypatch, tmp_path, supplied="ares_agt_one", minted_with="ares_agt_one")
+    calls = _record_register(monkeypatch, result=AgentState("unexpected", "agtk-unexpected"))
+
+    state = await main._enroll(["10.0.0.0/24"])
+
+    assert state is not None and state.agent_id == "already-here"
+    assert calls == []
+
+
+async def test_a_start_with_no_token_at_all_keeps_its_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A hand-run container that supplies no ARES_TOKEN has nothing to compare against, and must
+    # keep serving on its stored credentials exactly as it did before.
+    _already_enrolled(monkeypatch, tmp_path, supplied="", minted_with="ares_agt_one")
+    calls = _record_register(monkeypatch, result=AgentState("unexpected", "agtk-unexpected"))
+
+    state = await main._enroll(["10.0.0.0/24"])
+
+    assert state is not None and state.agent_id == "already-here"
+    assert calls == []
+
+
+async def test_a_different_token_re_enrolls_this_host_as_the_new_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The reported bug, fixed: the operator re-ran the installer with the token Ares minted for a
+    # new agent, so that token gets presented and the host adopts the identity it names.
+    _already_enrolled(monkeypatch, tmp_path, supplied="ares_agt_two", minted_with="ares_agt_one")
+    adopted = AgentState("brand-new", "agtk-brand-new", fingerprint("ares_agt_two"))
+    calls = _record_register(monkeypatch, result=adopted)
+
+    state = await main._enroll(["10.0.0.0/24"])
+
+    assert state is adopted
+    assert calls == [["10.0.0.0/24"]]
+
+
+async def test_a_spent_token_keeps_the_working_identity_and_is_not_presented_twice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stored = _already_enrolled(
+        monkeypatch, tmp_path, supplied="ares_agt_spent", minted_with="ares_agt_one"
+    )
+    calls = _record_register(
+        monkeypatch, result=main.control_plane.RegistrationRejected("401 Unauthorized")
+    )
+
+    with caplog.at_level(logging.INFO, logger="ares.agent"):
+        first = await main._enroll(["10.0.0.0/24"])
+
+    # The credentials still work, so nothing is torn down over it.
+    assert first is not None and first.agent_id == stored.agent_id
+    assert len(calls) == 1
+    # This exact phrase is what scripts/bootstrap.sh greps to fail the install, and it has to be
+    # loud: the operator asked for a new agent and did not get one.
+    kept = [r for r in caplog.records if "Keeping the existing agent identity" in r.getMessage()]
+    assert [r.levelno for r in kept] == [logging.WARNING]
+    assert "ARES_RESET=1" in kept[0].getMessage()
+
+    # A second start must not spend another call on a token already known to be dead.
+    second = await main._enroll(["10.0.0.0/24"])
+
+    assert second is not None and second.agent_id == stored.agent_id
+    assert len(calls) == 1
+
+
+async def test_an_agent_that_predates_the_fingerprint_records_it_quietly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Every agent already deployed takes this path once, on the restart that upgrades it: it has
+    # no fingerprint, and the ARES_TOKEN in its env is the original, long-spent one. So the
+    # rejection is expected, and must neither alarm a whole fleet nor - via the marker bootstrap
+    # greps - make an ordinary re-run of the installer look like a failed re-enrollment.
+    _already_enrolled(monkeypatch, tmp_path, supplied="ares_agt_original", minted_with=None)
+    calls = _record_register(
+        monkeypatch, result=main.control_plane.RegistrationRejected("401 Unauthorized")
+    )
+
+    with caplog.at_level(logging.INFO, logger="ares.agent"):
+        state = await main._enroll(["10.0.0.0/24"])
+
+    assert state is not None and state.agent_id == "already-here"
+    assert len(calls) == 1
+    assert not any("Keeping the existing agent identity" in r.getMessage() for r in caplog.records)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    # ...and the answer is written down, so this costs one call per agent rather than one per
+    # restart forever.
+    assert load_state(main.settings.state_path).minted_with("ares_agt_original")
+
+
+@pytest.mark.usefixtures("_instant_loop")
+async def test_an_unreachable_ares_retries_instead_of_settling_for_the_old_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # "Ares was down on this boot" must never be read as "that token is spent". Falling back to
+    # the stored identity here would let a single network blip during a re-install decide the
+    # host's identity permanently, with the fingerprint written down to make it stick.
+    _already_enrolled(monkeypatch, tmp_path, supplied="ares_agt_two", minted_with="ares_agt_one")
+    adopted = AgentState("brand-new", "agtk-brand-new", fingerprint("ares_agt_two"))
+    attempts: list[int] = []
+
+    async def _register(_state: AgentState, _networks: list[str]) -> AgentState:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise httpx.ConnectError("no route to host")
+        return adopted
+
+    monkeypatch.setattr(main, "_register", _register)
+
+    state = await main._enroll(["10.0.0.0/24"])
+
+    assert state is adopted
+    assert len(attempts) == 3
+
+
+async def test_a_first_install_still_enrolls_and_still_reports_a_rejected_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Unchanged behaviour, pinned because the branch above it is new: with nothing on disk a
+    # refused token is fatal, and says so in the words bootstrap greps to fail fast.
+    monkeypatch.setattr(main.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(main.settings, "token", SecretStr("ares_agt_new"))
+    calls = _record_register(
+        monkeypatch, result=main.control_plane.RegistrationRejected("401 Unauthorized")
+    )
+
+    with caplog.at_level(logging.ERROR, logger="ares.agent"):
+        assert await main._enroll(["10.0.0.0/24"]) is None
+
+    assert len(calls) == 1
+    assert any("Registration token rejected" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.usefixtures("_instant_loop")
+async def test_the_online_line_reports_the_name_ares_holds_not_ares_agent_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ARES_AGENT_NAME is a request, not the answer: the deploy wizard's label overrides it at
+    # enrollment. Printing the request as though it were the answer is exactly how a container
+    # serving on an earlier install's credentials used to read as a success in `docker logs`.
+    beats: list[object] = [{"name": "Heffe 2", "heartbeat_interval_seconds": 30}]
+    monkeypatch.setattr(main.control_plane, "heartbeat", _scripted_heartbeat(beats))
+    monkeypatch.setattr(main.settings, "agent_name", "Heffe 3")
+
+    state = AgentState(agent_id="agent-1", agent_token="good-token")
+    with caplog.at_level(logging.INFO, logger="ares.agent"):
+        with pytest.raises(asyncio.CancelledError):
+            await main._heartbeat_loop(state, Mock())
+
+    online = next(r.getMessage() for r in caplog.records if "Agent online" in r.getMessage())
+    assert 'Agent online as "Heffe 2" (agent agent-1).' == online
+    # and the disagreement with what the operator asked for is called out rather than buried.
+    mismatch = [r for r in caplog.records if "differs from ARES_AGENT_NAME" in r.getMessage()]
+    assert [r.levelno for r in mismatch] == [logging.WARNING]
+
+
+@pytest.mark.usefixtures("_instant_loop")
+async def test_an_older_control_plane_sends_no_name_and_the_line_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Against a control plane that predates the field there is no authoritative name to print, so
+    # the line falls back to the id and marks the name "local" -- it must not imply the dashboard
+    # agrees, and it must not warn about a mismatch it cannot actually see.
+    beats: list[object] = [{"heartbeat_interval_seconds": 30}]
+    monkeypatch.setattr(main.control_plane, "heartbeat", _scripted_heartbeat(beats))
+    monkeypatch.setattr(main.settings, "agent_name", "Heffe 3")
+
+    state = AgentState(agent_id="agent-1", agent_token="good-token")
+    with caplog.at_level(logging.INFO, logger="ares.agent"):
+        with pytest.raises(asyncio.CancelledError):
+            await main._heartbeat_loop(state, Mock())
+
+    online = next(r.getMessage() for r in caplog.records if "Agent online" in r.getMessage())
+    assert 'Agent online as agent agent-1 (local name "Heffe 3").' == online
+    assert not any("differs from ARES_AGENT_NAME" in r.getMessage() for r in caplog.records)

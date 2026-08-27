@@ -26,7 +26,7 @@ from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.hostpins import HostPins
 from agent.identify import IdentityProbe
-from agent.state import AgentState, load_state, save_state
+from agent.state import AgentState, fingerprint, load_state, save_state
 from agent.tunnel import (
     TunnelManager,
     explain_probe_failure,
@@ -132,15 +132,32 @@ def _insecure_allowed(base_url: str) -> bool:
     return host in _INSECURE_OK_HOSTS or host.endswith(".local") or "staging" in host
 
 
+def _server_name(resp: dict) -> str | None:
+    """The label ares assigned this agent, or None from a control plane too old to send one.
+
+    Worth reading rather than assuming ARES_AGENT_NAME: at enrollment the name chosen in the
+    deploy wizard *overrides* what the agent reports, so the dashboard can legitimately show
+    something the operator never typed into the install command.
+    """
+    name = resp.get("name")
+    return name.strip() if isinstance(name, str) and name.strip() else None
+
+
 async def _register(state: AgentState, networks: list[str]) -> AgentState:
     logger.info("Registering with %s (networks=%s)", settings.base_url, networks or "none")
+    presented = settings.token.get_secret_value()
     resp = await control_plane.register(settings, networks=networks, name=settings.agent_name)
     state.agent_id = resp["agent_id"]
     state.agent_token = resp["agent_token"]
+    # Bind the identity to the token that minted it. This is the whole point of the field: on a
+    # later start it separates an ordinary restart (same token, keep serving) from an operator
+    # re-running the installer with the token for a *different* agent. See _enroll.
+    state.registration_token_fingerprint = fingerprint(presented)
     _cadence["heartbeat"] = resp.get("heartbeat_interval_seconds", _cadence["heartbeat"])
     _cadence["poll"] = resp.get("poll_interval_seconds", _cadence["poll"])
     save_state(settings.state_path, state)
-    logger.info("Registered as agent %s", state.agent_id)
+    name = _server_name(resp)
+    logger.info("Registered as agent %s%s", state.agent_id, f' ("{name}")' if name else "")
     return state
 
 
@@ -286,10 +303,44 @@ async def _watchdog_loop() -> None:
             os._exit(1)
 
 
+def _online_label(state: AgentState, server_name: str | None) -> str:
+    """How the "online" line names this agent: ares' own label, else the id and a local name.
+
+    The fallback is marked "local" on purpose, so a line produced against a control plane too
+    old to send a name never reads as confirmation that the dashboard agrees.
+    """
+    if server_name:
+        return f'"{server_name}" (agent {state.agent_id})'
+    return f'agent {state.agent_id} (local name "{settings.agent_name or "this host"}")'
+
+
+def _warn_on_name_mismatch(server_name: str | None) -> None:
+    """Say so when ares knows this agent by a different name than ARES_AGENT_NAME asked for.
+
+    Two innocent causes (the deploy wizard's label overrides the agent-reported one at
+    enrollment, or the agent was renamed in the dashboard) and one that is not: the container is
+    serving on an identity from an earlier install. The agent cannot tell them apart, so this
+    warns rather than fails - but it does put "I asked for Heffe 3 and got Heffe 2" in
+    ``docker logs``, instead of leaving it to be inferred from the dashboard.
+    """
+    wanted = settings.agent_name.strip()
+    if not wanted or not server_name or wanted.casefold() == server_name.casefold():
+        return
+    logger.warning(
+        'Ares knows this agent as "%s", which differs from ARES_AGENT_NAME ("%s"). Expected if '
+        "the name was set in the deploy wizard or changed in the dashboard; if you meant to "
+        "install a *new* agent on this host, this container is serving on an earlier enrollment "
+        "- re-run the installer with a fresh token, or with ARES_RESET=1.",
+        server_name,
+        wanted,
+    )
+
+
 async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
     failures = 0
     unauthorized = 0
     online_announced = False
+    name_checked = False
     while True:
         try:
             # CPU sampling reads the cgroup counter twice on the first call; keep it off the loop.
@@ -304,12 +355,17 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
             )
             # Announce "online" only once the control plane has actually accepted a beat, so
             # the log never claims the agent is up while its credentials are in fact rejected.
+            #
+            # Name it by what *ares* calls this agent, not by ARES_AGENT_NAME. The env var is a
+            # request, not the answer: the control plane may already hold a different label for
+            # this identity, and printing the request as though it were the answer is precisely
+            # how a container serving on an earlier install's credentials used to read as success.
             if not online_announced:
-                logger.info(
-                    'Agent online, visible in the dashboard as "%s".',
-                    settings.agent_name or "this host",
-                )
+                logger.info("Agent online as %s.", _online_label(state, _server_name(resp)))
                 online_announced = True
+            if not name_checked:
+                name_checked = True
+                _warn_on_name_mismatch(_server_name(resp))
             if failures:
                 logger.info("Heartbeat recovered after %d failed attempt(s).", failures)
             failures = 0
@@ -468,22 +524,17 @@ async def _poll_loop(state: AgentState) -> None:
         await asyncio.sleep(_cadence["poll"])
 
 
-async def _enroll(networks: list[str]) -> AgentState | None:
-    """Return a registered state, re-using a stored identity or enrolling with ARES_TOKEN.
+async def _register_with_retries(state: AgentState, networks: list[str]) -> AgentState | None:
+    """Register, retrying transient connectivity forever; None *only* when the token is refused.
 
-    Retries transient connectivity errors forever (the control plane may not be reachable
-    yet); returns None only when the registration token is rejected outright (expired or
-    already used), which is fatal and the caller surfaces to the operator.
+    Keeping those two outcomes apart is the point of the helper. Both callers act on the None,
+    and "Ares was not reachable on this boot" must never be read as "this token is spent": a
+    single blip during a restart would otherwise decide the host's identity for good.
     """
-    state = load_state(settings.state_path)
-    while not state.registered:
+    while True:
         try:
-            state = await _register(state, networks)
+            return await _register(state, networks)
         except control_plane.RegistrationRejected:
-            logger.error(
-                "Registration token rejected (expired or already used). "
-                "Generate a fresh token in the Ares dashboard."
-            )
             return None
         except (httpx.HTTPError, OSError) as exc:
             logger.error(
@@ -494,7 +545,86 @@ async def _enroll(networks: list[str]) -> AgentState | None:
                 _REGISTER_RETRY_SECONDS,
             )
             await asyncio.sleep(_REGISTER_RETRY_SECONDS)
+
+
+async def _adopt_new_token(state: AgentState, networks: list[str], presented: str) -> AgentState:
+    """Present an ARES_TOKEN this identity was not minted from; keep the identity if it fails.
+
+    Non-destructive: the register call builds a brand-new state and is itself the only thing
+    that persists one, so a refusal leaves the working credentials exactly as they were.
+    """
+    legacy = state.registration_token_fingerprint is None
+    logger.info(
+        "ARES_TOKEN is not the token this agent enrolled with; presenting it%s.",
+        " (this identity predates token binding, so it may well be the original one)"
+        if legacy
+        else "",
+    )
+    adopted = await _register_with_retries(AgentState(), networks)
+    if adopted is not None:
+        logger.warning(
+            "Re-enrolled as a new agent %s. The previous identity %s is retired: it stops "
+            "heartbeating now and goes offline in the dashboard.",
+            adopted.agent_id,
+            state.agent_id,
+        )
+        return adopted
+    # The token is spent. Record it against the identity we are keeping so the next restart does
+    # not repeat this call, then carry on serving - these credentials still work.
+    state.registration_token_fingerprint = fingerprint(presented)
+    save_state(settings.state_path, state)
+    if legacy:
+        # Almost certainly the token that enrolled this very agent, re-supplied by an ordinary
+        # restart of a container that predates the fingerprint. Nothing is wrong; say so quietly
+        # rather than alarming every agent in a fleet on the day it upgrades.
+        logger.info(
+            "That token is already spent, which is expected for an agent that enrolled before "
+            "this version; continuing as agent %s.",
+            state.agent_id,
+        )
+    else:
+        logger.warning(
+            "Keeping the existing agent identity %s: the supplied ARES_TOKEN is already spent, "
+            "so this host could not enrol as a new agent. Generate a fresh token in the Ares "
+            "dashboard, or re-run the installer with ARES_RESET=1 to discard this identity.",
+            state.agent_id,
+        )
     return state
+
+
+async def _enroll(networks: list[str]) -> AgentState | None:
+    """Return a registered state, re-using the stored identity or enrolling with ARES_TOKEN.
+
+    Three kinds of start arrive here:
+
+    * A first install has no stored identity, and enrolls.
+    * An ordinary restart - including the one the auto-update companion performs, which copies
+      the container's env verbatim - carries an identity minted from the same ARES_TOKEN, and
+      simply keeps it. No register call, so a version bump can never mint a duplicate agent.
+    * An operator re-running the installer on this host with the token for a *new* agent carries
+      an identity bound to a different token. That token gets presented, because the alternative
+      (what this did before) is to discard it in silence and go on heartbeating as the old agent
+      while the newly provisioned one sits at "Offline, never" in the dashboard forever.
+
+    Returns None only when a *first* enrollment is refused, which is fatal and the caller
+    surfaces to the operator. A refused re-enrollment is not fatal: the stored identity still
+    works, so the agent keeps serving under it and says so.
+    """
+    state = load_state(settings.state_path)
+    presented = settings.token.get_secret_value()
+    if not state.registered:
+        enrolled = await _register_with_retries(state, networks)
+        if enrolled is None:
+            logger.error(
+                "Registration token rejected (expired or already used). "
+                "Generate a fresh token in the Ares dashboard."
+            )
+        return enrolled
+    # No token to compare against (a hand-run container that supplies none) leaves the stored
+    # identity untouched, exactly as before.
+    if not presented or state.minted_with(presented):
+        return state
+    return await _adopt_new_token(state, networks, presented)
 
 
 async def _reenroll(networks: list[str]) -> AgentState | None:
@@ -502,10 +632,14 @@ async def _reenroll(networks: list[str]) -> AgentState | None:
 
     Non-destructive by design: this enrolls into a brand-new state and only persists it on
     success, so the caller can keep the existing credentials if this fails. It succeeds only
-    when ARES_TOKEN is still an unused, valid registration token (the kept-volume case, where
-    the stored token was minted for a previous container). It returns None when the token is
-    already spent (a decommissioned agent, or a healthy agent that merely hit a transient 401)
-    or Ares is unreachable, so a blanket 401 never strands the agent on a one-time token.
+    when ARES_TOKEN is still an unused, valid registration token. It returns None when the token
+    is already spent (a decommissioned agent, or a healthy agent that merely hit a transient
+    401) or Ares is unreachable, so a blanket 401 never strands the agent on a one-time token.
+
+    This is the reactive half of the pair: it recovers an agent whose *stored token* stopped
+    being accepted. The proactive half is :func:`_adopt_new_token`, which notices at startup
+    that a different registration token was supplied and never waits for a 401 - the kept-volume
+    re-install produces no 401 at all, because the old credentials remain perfectly valid.
     """
     try:
         return await _register(AgentState(), networks)
