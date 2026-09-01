@@ -482,6 +482,39 @@ def test_the_enrollment_token_never_renders_in_a_log_or_repr() -> None:
     assert settings.token.get_secret_value() == "super-secret-enrollment-token"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080",
+        "https://host.docker.internal",
+        "https://box.local",
+        "https://staging.internal.example",  # legacy substring match, kept
+        "https://staging.assailai.com",
+        "https://peregrine.ares.assailai.com",  # any non-prod *.assailai.com
+        "https://pr-42.assailai.com",
+    ],
+)
+def test_insecure_allowed_for_local_staging_and_nonprod_assailai(url: str) -> None:
+    # ARES_INSECURE skips TLS verification, so it is only tolerable off production. Every host
+    # here is local, staging, or a non-production *.assailai.com environment.
+    assert main._insecure_allowed(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ares.assailai.com",  # production: must always verify TLS
+        "https://ares.assailai.com/api",
+        "https://example.com",
+        "https://not-assailai.com",  # a look-alike must not match the suffix
+        "https://assailai.com.evil.net",
+    ],
+)
+def test_insecure_denied_for_production_and_foreign_hosts(url: str) -> None:
+    # production keeps a verified certificate, and a look-alike domain must never qualify.
+    assert main._insecure_allowed(url) is False
+
+
 # --- which identity a start serves under --------------------------------------------------------
 #
 # The bug these cover: the agent used to short-circuit on any stored identity, so re-installing on
