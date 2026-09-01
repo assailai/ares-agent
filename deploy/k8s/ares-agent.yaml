@@ -18,6 +18,10 @@ metadata:
   name: ares-agent
 stringData:
   ARES_TOKEN: "<your-registration-token>"   # one-time token from Settings -> Agents
+  # The Ares control plane the agent connects to. The image already defaults to
+  # https://ares.assailai.com, so leave this as-is for the SaaS; change it to your own host for a
+  # self-hosted or staging control plane (e.g. https://staging.assailai.com).
+  ARES_URL: "https://ares.assailai.com"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -39,7 +43,7 @@ kind: Role
 metadata:
   name: ares-updater
 rules:
-  # the updater may only read and patch this one Deployment - nothing else.
+  # the updater may only read and patch this one Deployment, nothing else.
   - apiGroups: ["apps"]
     resources: ["deployments"]
     resourceNames: ["ares-agent"]
@@ -78,6 +82,10 @@ spec:
         app: ares-agent
     spec:
       serviceAccountName: ares-updater
+      # Only the updater needs the Kubernetes API (to patch this Deployment). The agent is the
+      # target-facing container, so keep the API token off it: disable the pod-wide automount and
+      # project the token into the updater container alone (see the volumes block below).
+      automountServiceAccountToken: false
       # A pod on the CNI network only sees the pod namespace. To scan the node's localhost + the
       # LAN + the docker/CNI networks, put the pod on the host network and set
       # ARES_SCAN_SCOPE=host-all (uncomment both):
@@ -89,7 +97,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ares-agent          # the patched container; ARES_UPDATE_CONTAINER matches this
-          image: assailai/ares-agent:3.6.0   # pinned; the updater rolls this forward
+          image: assailai/ares-agent:3.7.0   # pinned; the updater rolls this forward
           envFrom:
             - secretRef:
                 name: ares-agent
@@ -126,7 +134,7 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
         - name: ares-updater         # companion; keeps ares-agent on the marked version
-          image: assailai/ares-updater:3.6.0
+          image: assailai/ares-updater:3.7.0
           env:
             - name: ARES_UPDATE_CONTAINER
               value: "ares-agent"
@@ -138,7 +146,11 @@ spec:
               value: "true"
           volumeMounts:
             - name: data
-              mountPath: /data        # reads the agent's update-target.json
+              mountPath: /data        # reads the agent's update-target.json only
+              readOnly: true          # never writes the agent's identity in /data
+            - name: kube-api-access   # the SA token, mounted into the updater alone (automount off)
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
             # cosign reaches the registry and the Sigstore log through the same proxy and fails
             # closed when it cannot verify, so the updater needs the same CAs as the agent.
             # - name: ca-certs
@@ -151,6 +163,25 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: ares-agent-data
+        # The ServiceAccount token, projected into the updater container only (automount is off
+        # above), so the target-facing agent never holds a token that can patch the Deployment.
+        # kube-root-ca.crt is the ConfigMap Kubernetes publishes in every namespace.
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
         # Pair with the /certs mounts above:
         #   kubectl create configmap ares-ca-certs --from-file=corp-root.crt=/path/to/root.crt
         # - name: ca-certs

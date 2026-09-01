@@ -71,6 +71,9 @@ _REENROLL_AFTER_UNAUTHORIZED = 3
 _REENROLL_RETRY_SECONDS = 60
 # hosts for which a plaintext / unverified ARES_URL is acceptable (local + staging only).
 _INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+# production control-plane hosts that must ALWAYS verify TLS, even though they end in the
+# allowed .assailai.com suffix below. A real customer agent must never skip verification here.
+_INSECURE_DENY_HOSTS = ("ares.assailai.com",)
 # cadence the server hands back at register / heartbeat (sane defaults until then).
 _cadence = {"heartbeat": 30, "poll": 5}
 # captured at import (process start) so heartbeats can report uptime since connect.
@@ -127,9 +130,18 @@ def _resolve_scan_limits() -> None:
 
 
 def _insecure_allowed(base_url: str) -> bool:
-    """ARES_INSECURE skips TLS verification, so only allow it against local / staging."""
+    """ARES_INSECURE skips TLS verification, so only allow it against local, staging, or a
+    non-production ``*.assailai.com`` host. Production (``ares.assailai.com``) is always denied:
+    a customer agent must keep a verified certificate there."""
     host = urlparse(base_url).hostname or ""
-    return host in _INSECURE_OK_HOSTS or host.endswith(".local") or "staging" in host
+    if host in _INSECURE_DENY_HOSTS:
+        return False
+    return (
+        host in _INSECURE_OK_HOSTS
+        or host.endswith(".local")
+        or host.endswith(".assailai.com")
+        or "staging" in host
+    )
 
 
 async def _register(state: AgentState, networks: list[str]) -> AgentState:
