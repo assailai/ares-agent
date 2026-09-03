@@ -88,11 +88,19 @@ async def heartbeat(
     cpu_percent: float | None = None,
     memory_percent: float | None = None,
     uptime_seconds: int | None = None,
+    detected_networks: list[str] | None = None,
 ) -> dict:
     body: dict[str, object] = {
         "agent_version": settings.agent_version,
         "capabilities": list(CAPABILITIES),
     }
+    # What reachability discovery currently believes this agent can reach. Sent on the beat and
+    # not only at register, because registration happens once: a self-updating agent keeps its
+    # token and never registers again, so a network that came into reach afterwards would stay
+    # invisible for the life of the install. Omitted entirely when there is nothing to report, so
+    # ares leaves what it already holds alone rather than blanking it.
+    if detected_networks:
+        body["detected_networks"] = detected_networks
     if public_ip is not None:
         body["public_ip"] = public_ip
     if last_handshake_at is not None:

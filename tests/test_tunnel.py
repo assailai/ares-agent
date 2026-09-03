@@ -45,13 +45,16 @@ class _RecordingWS:
 
 
 def _client(
-    networks: list[str] | None = None, allowed_hosts: set[str] | None = None
+    networks: list[str] | None = None,
+    allowed_hosts: set[str] | None = None,
+    scoped_hosts: set[str] | None = None,
 ) -> TunnelClient:
     return TunnelClient(
         "ws://x/api/v1/agent/tunnel",
         "tok",
         networks if networks is not None else ["10.0.0.0/24", "192.168.1.0/24"],
         allowed_hosts if allowed_hosts is not None else set(),
+        scoped_hosts=scoped_hosts if scoped_hosts is not None else set(),
         ssl_context=None,
     )
 
@@ -513,3 +516,77 @@ def test_a_resolver_timeout_says_what_happened() -> None:
         asyncio.run(go())
     finally:
         tunnel_mod._RESOLVE_TIMEOUT = original
+
+
+# --- addresses an operator put in the agent's scope by hand -------------------------------------
+
+
+def test_a_scoped_address_is_dialable_outside_the_registered_networks() -> None:
+    """The reason this exists at all.
+
+    The two halves are decided in different places: the agent bounds an IP literal by the networks
+    IT detected, while the scope is what ares was told. An operator can legitimately add an address
+    the agent's own detection never reached, and without this clause the scan finds that host and
+    the tunnel then refuses to dial it, which reads as a machine that exists and cannot be
+    assessed.
+    """
+    client = _client(networks=["10.0.0.0/24"], scoped_hosts={"10.20.1.50"})
+
+    async def go() -> str:
+        return await client._dial_address("10.20.1.50", 443)
+
+    assert asyncio.run(go()) == "10.20.1.50"
+
+
+def test_a_scoped_address_grants_that_address_and_nothing_beside_it() -> None:
+    """Exact match only. The scope is a statement about one machine, so it must never widen into
+    the machine's neighbours the way a network entry would."""
+    client = _client(networks=["10.0.0.0/24"], scoped_hosts={"10.20.1.50"})
+
+    async def go() -> str:
+        return await client._dial_address("10.20.1.51", 443)
+
+    with pytest.raises(Refused):
+        asyncio.run(go())
+
+
+def test_a_scoped_name_never_matches_by_suffix() -> None:
+    """host_approved beside this one understands wildcards and domain suffixes, because a
+    federated login visits hosts nobody can enumerate. A hand-added host is not that, so
+    "payroll.corp.local" must not carry "evil.payroll.corp.local" with it."""
+    client = _client(networks=["10.0.0.0/24"], scoped_hosts={"payroll.corp.local"})
+    _stub_resolver(client, {"evil.payroll.corp.local": ["203.0.113.9"]})
+
+    async def go() -> str:
+        return await client._dial_address("evil.payroll.corp.local", 443)
+
+    with pytest.raises(Refused):
+        asyncio.run(go())
+
+
+def test_scoped_hosts_reach_a_live_tunnel_without_a_reconnect() -> None:
+    """The manager mutates the shared set in place, exactly as it does for the per-hunt allowlist,
+    so an address added in the dashboard is dialable on the next beat rather than at the next
+    reconnect."""
+    manager = TunnelManager(
+        "ws://x/api/v1/agent/tunnel", "tok", ["10.0.0.0/24"], ssl_context=None
+    )
+    shared = manager._scoped_hosts
+
+    manager.sync(False, (), ("10.20.1.50",))
+
+    assert shared is manager._scoped_hosts  # same object: a live client sees the update
+    assert manager._scoped_hosts == {"10.20.1.50"}
+
+
+def test_set_networks_widens_what_an_ip_literal_is_bounded_by() -> None:
+    """Reachability discovery keeps running after enrollment, so what the agent believes it can
+    reach has to be updatable. Reporting a new network to ares without this leaves the scan finding
+    hosts the tunnel refuses."""
+    manager = TunnelManager(
+        "ws://x/api/v1/agent/tunnel", "tok", ["172.23.0.0/16"], ssl_context=None
+    )
+
+    manager.set_networks(["172.23.0.0/16", "10.20.0.0/16"])
+
+    assert manager._allowed_networks == ["172.23.0.0/16", "10.20.0.0/16"]

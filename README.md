@@ -134,13 +134,72 @@ The agent is configured entirely through environment variables (all prefixed `AR
 |----------|---------|-------------|
 | `ARES_TOKEN` | *(required)* | One-time registration token from the dashboard. The agent exits with a clear message if it is missing. |
 | `ARES_URL` | `https://ares.assailai.com` | Base URL of the Ares control plane. Override when self-hosting. |
-| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection. You can also edit the networks in the dashboard after enrollment. |
+| `ARES_NETWORKS` | *(auto-detected)* | Comma-separated CIDRs to scan, e.g. `10.0.0.0/24,192.168.1.0/24`. Overrides auto-detection and switches network discovery off entirely: an explicit list is a decision, so nothing widens it. You can also edit the networks in the dashboard after enrollment. |
+| `ARES_SCAN_SCOPE` | `reachable` | How broadly to scan when `ARES_NETWORKS` is unset. See [Network discovery](#network-discovery). `reachable` (default), `supernet16`, `attached`, `rfc1918`, `host-all`. |
+| `ARES_REACH_PROBE` | `true` | Whether `reachable` runs its active probe of private space, as opposed to reading the machine's routing and neighbour tables only. |
+| `ARES_REACH_BUDGET_SECONDS` | `600` | Wall clock the probe may spend. When it runs out the agent advertises what it found and logs the truncation. |
+| `ARES_REACH_REFRESH_SECONDS` | `21600` | How often to look again, so a network that appears after the install is picked up. `0` runs discovery once, at startup. |
 | `ARES_AGENT_NAME` | *(host name)* | Friendly name shown in the dashboard. |
 | `ARES_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
 | `ARES_INSECURE` | `false` | Skip TLS verification. Local and staging URLs only; the agent refuses to start with this set against a production URL. |
 | `ARES_CA_BUNDLE` | *(none)* | Extra CA roots to trust, as a PEM file or a directory of them. Rarely needed: the agent already trusts this host's CA store (see [TLS inspection](#tls-inspection-corporate-proxy)). Set it only for a root that is in neither the host store nor `/certs`. |
 | `ARES_HOST_ALIASES` | *(none)* | Static `name=address` pins, comma or space separated, e.g. `sso.acme.internal=10.1.2.3`. Rarely needed: the agent already reads this host's `/etc/hosts` (see [Name resolution](#name-resolution)). Set it only for a pin that is not in there. |
 | `ARES_DNS` | *(none)* | Extra resolvers for the container, comma separated. Read by the install command, not the agent. Only needed when this host's own resolver cannot answer an internal name. |
+
+### Network discovery
+
+An agent is deployed to find what is on a customer's internal networks, and until 3.9 it only ever
+looked at the network its own interface sat on, widened to the enclosing /16. An agent on
+172.23.104.x therefore scanned 172.23.0.0/16 and nothing else, so an estate with services on
+10.20.x.x was invisible, with nothing on screen to say so. What an interface is attached to says
+where the agent **is**; it says nothing about where the agent can **go**.
+
+The default scope, `reachable`, answers the second question from three sources:
+
+1. **The attached subnets**, widened to /16 exactly as `supernet16` did. Nothing that used to be
+   scanned stops being scanned; the other two sources only ever add.
+2. **The machine's routing and neighbour tables.** Every private destination the kernel holds a
+   route for, plus the /24 of every address it has exchanged a frame with. Free, and it is exactly
+   the corporate case: a static route pointing 10.20.0.0/16 at the router. Its blind spot is the
+   ordinary bridge-networked container, which has its own network namespace and so sees only its
+   own bridge and a default route.
+3. **An active probe of private space** (10/8, 172.16/12, 192.168/16 and RFC 6598 100.64/10),
+   which is what covers that blind spot: it tests reachability rather than inferring it, so it
+   works the same in a bridge-networked container, under host networking, and in Kubernetes. It
+   samples every /24 thinly, then goes back over the /16s that showed any life and samples those
+   densely, so a sparse VLAN inside a populated range is still found. Nothing but a TCP connect and
+   an immediate close is sent, and a refused connection counts as a hit (a host that refuses is
+   still a host).
+
+**Discovery never delays enrollment.** The agent registers on its attached subnets and comes online
+in seconds, then discovery runs in the background and reports what it finds on the next heartbeat;
+Ares widens the scan scope and starts a scan of anything new. It repeats on
+`ARES_REACH_REFRESH_SECONDS`, because an agent registers exactly once and a self-updating one never
+registers again, so a VLAN added six months later would otherwise never be seen.
+
+The dashboard shows the difference: an agent's panel lists the networks in its scope, and separately
+anything it reported it can reach that is not in scope yet.
+
+| Scope | What it scans |
+|-------|---------------|
+| `reachable` *(default)* | The attached subnets widened to /16, plus every private network the agent can demonstrably reach. |
+| `supernet16` | Each attached subnet widened to its enclosing /16. The pre-3.9 default. |
+| `attached` | The interface prefixes exactly as configured, unwidened. |
+| `rfc1918` | All private ranges, blindly, each capped at `ARES_SCAN_MAX_HOSTS` and logged. Slow and coarse; `reachable` supersedes it. |
+| `host-all` | `supernet16` plus the docker bridge subnets and the host loopback. For a container run with host networking. |
+
+Set `ARES_REACH_PROBE=false` to keep the routing-table half and skip the packets, or set
+`ARES_NETWORKS` to skip discovery altogether.
+
+### Hosts added by hand
+
+Discovery is thorough, but an operator knows the estate better than any scan. A campaign agent's
+panel in the dashboard takes an address or an internal hostname, with an optional name and a note.
+An entry added there is marked **Manual** and, unlike anything a scan finds, is never removed by a
+later rescan: every scan from then on includes it, and the agent is authorized to dial it through
+the tunnel even when it falls outside the networks the agent detected for itself. Adding an IP
+address also queues a scan of it immediately, so its services fill in without waiting for the next
+full rescan.
 
 ### Host identification
 
@@ -381,6 +440,7 @@ Start with the logs: `docker logs ares-agent`. The agent narrates each step.
 | `CERTIFICATE_VERIFY_FAILED ... self-signed certificate in certificate chain` | Your network is inspecting TLS and the agent does not trust the root doing it. See [TLS inspection](#tls-inspection-corporate-proxy). Check the `TLS trust:` line at startup to see what the agent did load. Installing the root *inside* the container with `update-ca-certificates` is not enough on agents older than 3.4.0, and does not survive an update on any version. |
 | `Preflight: data-plane tunnel FAILED` | The agent can reach Ares but not open the tunnel that hunts run over, so it is online but cannot assess your internal network. The message names the likely cause. An HTTP status where a `101` belongs means something refused the upgrade rather than blocking the connection: allow WebSocket upgrades to your Ares host. The agent keeps running and retries when a hunt starts. |
 | `No internal LAN auto-detected` | Auto-detection found nothing scannable. Set `ARES_NETWORKS=10.0.0.0/24,...` or edit the networks in the dashboard. |
+| `Reachability probe budget of Ns is spent` | The probe ran out of wall clock and advertised what it had found so far. Raise `ARES_REACH_BUDGET_SECONDS`, or set `ARES_NETWORKS` to skip discovery. |
 | `Heartbeat unauthorized` | The stored agent credentials were rejected (a decommissioned agent, or stale credentials from a kept `/data` volume). After a few consecutive rejections the agent tries to re-enroll with `ARES_TOKEN`: if the token is still unused it adopts a fresh identity and recovers; if the token is spent it keeps the current credentials and retries (it does not exit or wipe anything), so a decommissioned agent idles quietly. To give such an agent a new identity, redeploy with a fresh token. |
 | `Keeping the existing agent identity` | You re-installed on a host that is already enrolled, with a registration token that is already spent, so this host stayed the agent it already was. Nothing was lost: it keeps serving under the identity it has. Generate a fresh token in Settings -> Agents, or re-run the installer with `ARES_RESET=1` to discard the stored identity first. See [Re-installing over an existing agent](#re-installing-over-an-existing-agent). |
 | `Ares knows this agent as "..." which differs from ARES_AGENT_NAME` | Harmless when the name came from the deploy wizard (which overrides `ARES_AGENT_NAME` at enrollment) or was changed in the dashboard. If you meant to install a *new* agent on this host, it means the container is serving on an earlier enrollment - re-run the installer with a fresh token, or with `ARES_RESET=1`. |

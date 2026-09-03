@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from agent.netdetect import (
+    DEFAULT_SCOPE,
+    REACHABLE_SCOPE,
     apply_scope,
     docker_networks_from_interfaces,
     host_all_targets,
     networks_from_interfaces,
+    scan_targets,
 )
 
 
@@ -97,3 +100,32 @@ def test_host_all_folds_in_loopback_lan_and_docker() -> None:
 def test_host_all_without_docker_is_just_loopback_and_lan() -> None:
     # no bridge present (agent not on a docker host) -> loopback + the widened LAN, nothing else.
     assert host_all_targets([("eth0", "10.2.3.4", 24)]) == ["10.2.0.0/16", "127.0.0.1/32"]
+
+
+# --- the "reachable" scope (resolved a level up, in agent.main) ---------------------------------
+
+
+def test_reachable_resolves_here_to_the_attached_subnets_widened(monkeypatch) -> None:
+    """``reachable`` needs to probe the network, so it is async and lives in agent.reachability.
+
+    What it resolves to HERE is the supernet16 base it builds on, which matters because it means
+    this function still answers usefully when the widening is skipped or fails: the agent falls
+    back to what it used to do rather than to nothing.
+    """
+    monkeypatch.setattr("agent.netdetect.detect_networks", lambda: ["172.23.104.0/24"])
+    assert scan_targets(REACHABLE_SCOPE) == ["172.23.0.0/16"]
+
+
+def test_the_fallback_scope_is_not_the_agents_default_scope() -> None:
+    """Two names because they answer different questions, and collapsing them would be a bug.
+
+    DEFAULT_SCOPE is what apply_scope falls back to for a value it does not understand; the agent's
+    own default is "reachable". If an unknown ARES_SCAN_SCOPE fell back to "reachable" it would
+    silently start probing a customer's private space over a typo.
+    """
+    assert DEFAULT_SCOPE == "supernet16"
+    assert REACHABLE_SCOPE != DEFAULT_SCOPE
+
+
+def test_an_unknown_scope_still_falls_back_to_supernet16_not_to_reachable() -> None:
+    assert apply_scope(["192.168.1.0/24"], "no-such-scope") == ["192.168.0.0/16"]

@@ -6,12 +6,20 @@ container bridge (172.17.0.0/16) as a target. The parsing is split from the OS c
 the filtering logic is unit-testable.
 
 ``scan_targets(scope)`` turns the detected attached subnets into the CIDRs the agent actually
-advertises and scans, so an operator never has to set ARES_NETWORKS: ``supernet16`` (the default)
-widens each attached subnet to its enclosing /16 to sweep the flat local network, ``attached``
-keeps the interface prefixes as-is, ``rfc1918`` targets all private ranges (each capped at the
-per-task host limit and logged, so the largest are only partial), opt-in and slow, and
-``host-all`` also folds in the docker bridge subnets and the host loopback so a host-networked
-container sweeps the container networks and localhost-bound services too.
+advertises and scans, so an operator never has to set ARES_NETWORKS. ``reachable`` (the default)
+starts from ``supernet16`` and then adds every private network the agent can DEMONSTRABLY reach, by
+reading the kernel's routes and probing private space (see :mod:`agent.reachability`); it is async
+and lives there rather than here. ``supernet16`` widens each attached subnet to its enclosing /16
+to sweep the flat local network, ``attached`` keeps the interface prefixes as-is, ``rfc1918``
+targets all private ranges (each capped at the per-task host limit and logged, so the largest are
+only partial), and ``host-all`` also folds in the docker bridge subnets and the host loopback so a
+host-networked container sweeps the container networks and localhost-bound services too.
+
+The default MOVED from ``supernet16`` to ``reachable``, and that is the substance of this change
+rather than a preference. What an interface is attached to says where the agent IS; it says nothing
+about where the agent can GO, and an agent on 172.23.104.x was advertising exactly ``172.23.0.0/16``
+while the customer ran half their estate on 10.20.x.x. ``supernet16`` remains available by name for
+anyone who wants the old, narrower behaviour.
 """
 
 from __future__ import annotations
@@ -25,9 +33,16 @@ logger = logging.getLogger("ares.agent.netdetect")
 
 # the private space, used by the (opt-in) ``rfc1918`` scope.
 _RFC1918 = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
-# widening scopes apply_scope understands; "host-all" is handled a level up in scan_targets.
+# widening scopes apply_scope understands; "host-all" and "reachable" are handled a level up (in
+# scan_targets and in agent.main respectively, the latter because it is async).
 VALID_SCOPES = ("attached", "supernet16", "rfc1918")
+#: The scope apply_scope falls back to for anything it does not understand, and the base
+#: ``reachable`` builds on. NOT the agent's default scope, which is ``reachable``: see
+#: ``Settings.scan_scope``. Two names because they answer different questions, and collapsing them
+#: would make an unknown ARES_SCAN_SCOPE silently trigger a private-space probe.
 DEFAULT_SCOPE = "supernet16"
+#: The agent's out-of-the-box scope. Handled in agent.main, which can await it.
+REACHABLE_SCOPE = "reachable"
 # the host's own loopback, added by "host-all" so localhost-bound services are found (a /32, not
 # the whole /8: services on 0.0.0.0 or the LAN ip are already caught by the LAN sweep).
 _HOST_LOOPBACK = "127.0.0.1/32"
@@ -184,7 +199,14 @@ def scan_targets(scope: str = DEFAULT_SCOPE) -> list[str]:
 
     ``host-all`` reads the raw interface set (so it can also see the docker bridges + loopback);
     the other scopes widen only the attached LANs.
+
+    ``reachable`` (the agent's default) is NOT resolved here: it needs to probe the network, so it
+    is async and lives in :mod:`agent.reachability`. It resolves to ``supernet16`` here and is then
+    widened by its extra sources in ``agent.main``, which means this function still answers usefully
+    if that widening is skipped or fails.
     """
     if scope == "host-all":
         return host_all_targets(_interface_rows())
+    if scope == REACHABLE_SCOPE:
+        scope = DEFAULT_SCOPE
     return apply_scope(detect_networks(), scope)

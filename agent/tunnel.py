@@ -287,6 +287,7 @@ class TunnelClient:
         allowed_networks: list[str],
         allowed_hosts: set[str],
         *,
+        scoped_hosts: set[str] | None = None,
         ssl_context: ssl.SSLContext | None,
         pins: HostPins | None = None,
     ) -> None:
@@ -295,6 +296,9 @@ class TunnelClient:
         self._ssl_context = ssl_context
         self._allowed = [ipaddress.ip_network(n, strict=False) for n in allowed_networks]
         self._allowed_hosts = allowed_hosts
+        # Shared with the manager and mutated in place, exactly like ``allowed_hosts``: an address
+        # added in the dashboard reaches a live tunnel on the next beat, without a reconnect.
+        self._scoped_hosts = scoped_hosts if scoped_hosts is not None else set()
         self._pins = pins if pins is not None else HostPins()
         self._writers: dict[int, asyncio.StreamWriter] = {}
         self._ws: websockets.ClientConnection | None = None
@@ -307,27 +311,48 @@ class TunnelClient:
             return False  # fail closed: an address we cannot parse is never "inside"
         return any(ip in net for net in self._allowed)
 
+    def _in_operator_scope(self, host: str) -> bool:
+        """Whether an operator put this exact destination in the agent's scope in the dashboard.
+
+        EXACT match only, deliberately, and that is the difference between this and
+        :func:`host_approved` beside it. That one implements a per-run widening that understands
+        wildcards and domain suffixes, because an interactive login visits hosts nobody can list in
+        advance. This is a standing statement about one address a person typed, so it grants that
+        address and nothing adjacent to it: no suffix, no wildcard, no "and anything under it".
+        """
+        return normalize_host(host) in self._scoped_hosts
+
     async def _dial_address(self, host: str, port: int) -> str:
         """The address to dial for ``host``, or raise :class:`Refused`.
 
-        An IP literal must be inside the registered networks. A hostname is resolved here and
-        allowed when *every* address it resolves to is inside them, or when ares pushed the name
-        for a running hunt. Returning a concrete address (not the name) is what keeps the check
-        and the connect on the same destination.
+        An IP literal must be inside the registered networks, or be one an operator put in this
+        agent's scope by hand. That second clause exists because the two halves are decided in
+        different places: the agent bounds an address by the networks IT detected, while the scope
+        is what ares was told, and an operator can legitimately add an address the agent's own
+        detection never reached. Without it a scan finds such a host and the tunnel then refuses to
+        dial it, which reads as a machine that exists and cannot be assessed. It widens by exact
+        address only (see :meth:`_in_operator_scope`), so it can never open a network.
+
+        A hostname is resolved here and allowed when *every* address it resolves to is inside the
+        registered networks, when ares pushed the name for a running hunt, or when it is in scope
+        by hand. Returning a concrete address (not the name) is what keeps the check and the
+        connect on the same destination.
         """
         if is_ip_literal(host):
-            if not self._in_allowed_networks(host):
-                raise Refused(f"{host} is outside this agent's registered networks")
+            if not self._in_allowed_networks(host) and not self._in_operator_scope(host):
+                raise Refused(
+                    f"{host} is outside this agent's registered networks and is not in its scope"
+                )
             return host
         addresses = await self._resolve(host, port)
         inside_networks = all(self._in_allowed_networks(a) for a in addresses)
         approved_by_ares = host_approved(host, self._allowed_hosts)
-        if inside_networks or approved_by_ares:
+        if inside_networks or approved_by_ares or self._in_operator_scope(host):
             return addresses[0]
         raise Refused(
             f"{host} resolves outside this agent's registered networks "
-            f"({summarize_addresses(addresses)}) and is not an approved target of a running "
-            "assessment"
+            f"({summarize_addresses(addresses)}), is not in this agent's scope, and is not an "
+            "approved target of a running assessment"
         )
 
     async def _resolve(self, host: str, port: int) -> list[str]:
@@ -471,11 +496,38 @@ class TunnelManager:
         self._token = token
         self._allowed_networks = allowed_networks
         self._allowed_hosts: set[str] = set()
+        # The addresses an operator put in this agent's scope in the dashboard. Held apart from
+        # _allowed_hosts because they authorize differently: this set is matched exactly and holds
+        # across runs, that one understands wildcards and lasts as long as a hunt does.
+        self._scoped_hosts: set[str] = set()
         self._ssl_context = ssl_context
         self._pins = pins if pins is not None else HostPins()
         self._task: asyncio.Task[None] | None = None
 
-    def sync(self, required: bool, allowed_hosts: Iterable[str] = ()) -> None:
+    def set_networks(self, networks: list[str]) -> None:
+        """Replace the networks an IP literal is bounded by, as reachability discovery learns more.
+
+        Takes effect on the next tunnel connection rather than on a live one: a connected client
+        parsed the list when it was built. That is a window of one reconnect against a re-detection
+        cadence measured in hours, and the alternative (re-parsing every CIDR on every dial) buys
+        nothing an operator would notice.
+        """
+        if networks == self._allowed_networks:
+            return
+        logger.info("tunnel allowed networks: %s", ", ".join(networks) or "none")
+        self._allowed_networks = list(networks)
+
+    def sync(
+        self,
+        required: bool,
+        allowed_hosts: Iterable[str] = (),
+        scoped_hosts: Iterable[str] = (),
+    ) -> None:
+        scoped = {normalize_host(h) for h in scoped_hosts if h and h.strip()}
+        if scoped != self._scoped_hosts:
+            logger.info("tunnel scoped hosts: %s", ", ".join(sorted(scoped)) or "none")
+        self._scoped_hosts.clear()
+        self._scoped_hosts.update(scoped)
         pushed = {normalize_host(h) for h in allowed_hosts if h and h.strip()}
         if pushed != self._allowed_hosts:
             # name the wildcard for what it means. "tunnel hostname destinations: *" reads like a
@@ -510,6 +562,7 @@ class TunnelManager:
                     self._token,
                     self._allowed_networks,
                     self._allowed_hosts,
+                    scoped_hosts=self._scoped_hosts,
                     ssl_context=self._ssl_context,
                     pins=self._pins,
                 ).run()
