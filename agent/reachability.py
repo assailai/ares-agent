@@ -265,8 +265,12 @@ class _Probe:
         async with self._semaphore:
             return await _answers(ip, port, self._timeout)
 
-    async def _alive(self, net: ipaddress.IPv4Network, octets: tuple[int, ...],
-                     ports: tuple[int, ...]) -> bool:
+    async def _alive(
+        self,
+        net: ipaddress.IPv4Network,
+        octets: tuple[int, ...],
+        ports: tuple[int, ...],
+    ) -> bool:
         """Whether anything in ``net`` answers on any sampled address/port.
 
         Every probe for one /24 is fired at once rather than sequentially with an early exit. The
@@ -376,8 +380,9 @@ async def discover(
                 concurrency=concurrency, budget_seconds=budget_seconds, timeout=timeout
             )
         except Exception:  # noqa: BLE001 - discovery is best-effort; never block enrollment on it
-            logger.warning("Reachability probe failed; using interfaces and routes only.",
-                           exc_info=True)
+            logger.warning(
+                "Reachability probe failed; using interfaces and routes only.", exc_info=True
+            )
     nets: list[ipaddress.IPv4Network] = []
     for cidr in found:
         try:
