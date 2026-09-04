@@ -46,7 +46,7 @@ class _AuthInvalidated(Exception):
 
 # scan concurrency resolved at startup against the file-descriptor budget (see
 # _resolve_scan_limits); per-connect timeouts + range breadth come from settings.
-_scan_limits = {"concurrency": 512}
+_scan_limits = {"concurrency": 512, "reach_concurrency": 512}
 # The pin table built at startup, shared with the identity phase so a discovered address can be
 # named from the host's own /etc/hosts. Module-level for the same reason as _scan_limits: a scan
 # task is driven by the poll loop and does not carry run()'s locals.
@@ -129,9 +129,22 @@ def _resolve_scan_limits() -> None:
             soft = target
     except (OSError, ValueError) as exc:
         logger.debug("could not raise file-descriptor limit: %s", exc)
-    concurrency = max(_MIN_CONCURRENCY, min(settings.scan_concurrency, soft - _FD_RESERVE))
+    budget = soft - _FD_RESERVE
+    concurrency = max(_MIN_CONCURRENCY, min(settings.scan_concurrency, budget))
     _scan_limits["concurrency"] = concurrency
-    logger.info("Scan concurrency=%d (file-descriptor soft limit=%d)", concurrency, soft)
+    # The reachability probe opens sockets from the same budget and would otherwise ask for its
+    # configured concurrency regardless of how many the container actually has, which is the same
+    # EMFILE the clamp above exists to prevent. It is bounded separately (and lower by default)
+    # because it reaches across the whole private space rather than one advertised network.
+    _scan_limits["reach_concurrency"] = max(
+        _MIN_CONCURRENCY, min(settings.reach_concurrency, budget)
+    )
+    logger.info(
+        "Scan concurrency=%d, reachability concurrency=%d (file-descriptor soft limit=%d)",
+        concurrency,
+        _scan_limits["reach_concurrency"],
+        soft,
+    )
 
 
 def _insecure_allowed(base_url: str) -> bool:
@@ -251,7 +264,7 @@ async def _resolve_networks() -> list[str]:
     return await reachability.discover(
         attached=attached,
         probe=settings.reach_probe,
-        concurrency=settings.reach_concurrency,
+        concurrency=_scan_limits["reach_concurrency"],
         budget_seconds=settings.reach_budget_seconds,
         timeout=settings.scan_discovery_timeout,
     )

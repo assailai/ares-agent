@@ -43,7 +43,7 @@ import ipaddress
 import logging
 import subprocess
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 logger = logging.getLogger("ares.agent.reachability")
 
@@ -248,7 +248,8 @@ class _Probe:
     """One reachability probe: shared budget, shared concurrency limit, shared result set."""
 
     def __init__(self, *, concurrency: int, budget_seconds: float, timeout: float) -> None:
-        self._semaphore = asyncio.Semaphore(max(1, concurrency))
+        self._concurrency = max(1, concurrency)
+        self._semaphore = asyncio.Semaphore(self._concurrency)
         self._budget = budget_seconds
         self._timeout = timeout
         self._started = time.monotonic()
@@ -294,23 +295,50 @@ class _Probe:
         octets: tuple[int, ...],
         ports: tuple[int, ...],
     ) -> list[ipaddress.IPv4Network]:
-        """The members of ``nets`` that answered, stopping early once the budget is spent."""
+        """The members of ``nets`` that answered, stopping early once the budget is spent.
+
+        Whole BATCHES of subnets are in flight at once, and the batch is sized so the number of
+        connects outstanding is about ``concurrency``. Awaiting one subnet at a time instead looks
+        concurrent, because each subnet fires its own probes together, but it caps the real
+        parallelism at the handful of probes ONE subnet makes: measured at 2.8 subnets a second,
+        which is 8 hours for private space and about 2% of it inside the default budget. The
+        semaphore is there to bound the connects; it can only do that if enough are asked for.
+        """
+        per_subnet = max(1, len(octets) * len(ports))
+        batch_size = max(1, self._concurrency // per_subnet)
+        batch: list[ipaddress.IPv4Network] = []
         alive: list[ipaddress.IPv4Network] = []
+
+        async def drain() -> None:
+            answered = await asyncio.gather(*(self._alive(n, octets, ports) for n in batch))
+            alive.extend(net for net, hit in zip(batch, answered) if hit)
+            batch.clear()
+
+        # Consumed as an iterable rather than materialized: the caller passes a generator over every
+        # /24 in private space, and holding all 86,272 of them just to slice it would be a list
+        # nothing reads twice.
         for net in nets:
+            batch.append(net)
+            if len(batch) < batch_size:
+                continue
             if self._spent:
-                break
-            if await self._alive(net, octets, ports):
-                alive.append(net)
+                return alive
+            await drain()
+        if batch and not self._spent:
+            await drain()
         return alive
 
 
-def _candidate_subnets(spaces: Iterable[ipaddress.IPv4Network]) -> list[ipaddress.IPv4Network]:
-    """Every /24 inside ``spaces``, in order."""
-    return [
-        subnet
-        for space in spaces
-        for subnet in (space.subnets(new_prefix=24) if space.prefixlen < 24 else iter((space,)))
-    ]
+def _candidate_subnets(
+    spaces: Iterable[ipaddress.IPv4Network],
+) -> Iterator[ipaddress.IPv4Network]:
+    """Every /24 inside ``spaces``, in order.
+
+    A generator rather than a list: private space is 86,272 of them, the probe consumes them in one
+    pass, and nothing reads the sequence twice.
+    """
+    for space in spaces:
+        yield from space.subnets(new_prefix=24) if space.prefixlen < 24 else iter((space,))
 
 
 async def probe_private_space(

@@ -7,6 +7,7 @@ connector rather than a socket, so the two-stage shape (thin sweep, then a dense
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 
 import pytest
@@ -147,11 +148,21 @@ async def test_probe_does_not_pay_for_a_dense_pass_over_dead_space(_fake_network
 
 async def test_probe_stops_when_its_budget_is_spent(_fake_network, monkeypatch) -> None:
     # A slow network must yield a partial map rather than run until something kills the container.
-    _fake_network({"10.20.5.1"})
-    clock = iter([0.0, 0.0, 1_000.0, 1_000.0, 1_000.0, 1_000.0])
+    #
+    # Asserts on what was NOT probed rather than on what was found. The budget is checked between
+    # batches, so whichever batch was in flight when it ran out still finishes: an assertion that
+    # nothing at all came back would be pinning the old one-subnet-at-a-time loop, whose real
+    # concurrency was six probes and which took eight hours over private space.
+    probed = _fake_network({"10.20.5.1"})
+    clock = iter([0.0, 0.0, 1_000.0])
     monkeypatch.setattr(reachability.time, "monotonic", lambda: next(clock, 1_000.0))
-    found = await reachability.probe_private_space(spaces=["10.20.0.0/16"], budget_seconds=1.0)
-    assert found == []  # nothing reached before the budget went
+
+    await reachability.probe_private_space(spaces=["10.20.0.0/16"], budget_seconds=1.0)
+
+    # a /16 holds 256 /24s and the batch is far smaller than that, so a probe that honoured the
+    # budget cannot have touched the end of the range.
+    assert "10.20.255.1" not in probed
+    assert len(probed) < 256 * len(reachability.SPARSE_OCTETS) * len(reachability.SPARSE_PORTS)
 
 
 async def test_probe_treats_a_refusal_as_proof_the_network_is_there(monkeypatch) -> None:
@@ -197,3 +208,33 @@ async def test_discover_survives_a_failing_probe(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(reachability, "probe_private_space", _explode)
     monkeypatch.setattr(reachability, "kernel_reachable", list)
     assert await reachability.discover(attached=["172.23.0.0/16"]) == ["172.23.0.0/16"]
+
+
+async def test_the_probe_keeps_many_subnets_in_flight_at_once(monkeypatch) -> None:
+    """The regression test for the reason this probe is usable at all.
+
+    The first version awaited one /24 at a time. Each fired its own handful of probes together, so
+    it LOOKED concurrent and the semaphore said 1024, but only six connects were ever outstanding:
+    measured at 2.8 subnets a second, which is eight hours over private space and about 2% of it
+    inside the default budget. The feature would have swept 10.0.0.0/8 as far as 10.6.x and then
+    logged a truncation, which is the exact miss it exists to fix.
+
+    Asserts on peak concurrency rather than on elapsed time, so it fails for the real reason on a
+    slow machine instead of flaking.
+    """
+    in_flight = 0
+    peak = 0
+
+    async def _answers(ip: str, port: int, timeout: float) -> bool:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)  # yield, so the rest of the batch gets to start
+        in_flight -= 1
+        return False
+
+    monkeypatch.setattr(reachability, "_answers", _answers)
+    await reachability.probe_private_space(spaces=["10.20.0.0/16"], concurrency=1024)
+
+    per_subnet = len(reachability.SPARSE_OCTETS) * len(reachability.SPARSE_PORTS)
+    assert peak > per_subnet * 10, f"only {peak} probes in flight; the batch is not being used"
