@@ -49,12 +49,34 @@ class Settings(BaseSettings):
     # registered networks / what ares approved. See agent.hostpins.
     host_aliases: str = ""
 
-    # how broadly to scan when ARES_NETWORKS is unset: "supernet16" (default; each attached
-    # subnet widened to its enclosing /16), "attached" (interface prefixes only), "rfc1918" (all
-    # private ranges, each capped at scan_max_hosts and logged, so the largest are partial --
-    # opt-in, slow), or "host-all" (supernet16 plus the docker bridge subnets and the host
-    # loopback -- for a container run with host networking). See agent.netdetect.
-    scan_scope: str = "supernet16"
+    # how broadly to scan when ARES_NETWORKS is unset: "reachable" (default; the attached subnets
+    # widened to /16, PLUS every private network the agent can demonstrably reach, found from the
+    # kernel's routing and neighbour tables and by probing private space -- see agent.reachability),
+    # "supernet16" (each attached subnet widened to its enclosing /16, the pre-3.9 default),
+    # "attached" (interface prefixes only), "rfc1918" (all private ranges, each capped at
+    # scan_max_hosts and logged, so the largest are partial -- blunt and slow), or "host-all"
+    # (supernet16 plus the docker bridge subnets and the host loopback -- for a container run with
+    # host networking). See agent.netdetect.
+    scan_scope: str = "reachable"
+    # Whether "reachable" runs its ACTIVE probe, as opposed to reading the kernel's tables only.
+    # The probe is what makes the default work in an ordinary bridge-networked container, where the
+    # routing table describes the container's own bridge and nothing else, so turning it off on the
+    # standard install reduces the default to roughly the old behaviour. Worth having anyway: an
+    # estate that does not want unsolicited connects across its private space can set this false
+    # and set ARES_NETWORKS instead.
+    reach_probe: bool = True
+    # Wall clock the reachability probe may spend, in seconds. It stops when this is gone and
+    # advertises what it found, logging the truncation; it is never a per-scan cost, only a
+    # per-enrollment and per-redetect one.
+    reach_budget_seconds: float = 600.0
+    # Concurrent connects during the probe. Below the scan's own concurrency on purpose: this
+    # reaches across a customer's whole private space rather than one advertised network.
+    reach_concurrency: int = 1024
+    # How often the agent re-runs reachability discovery and reports the result, in seconds. A
+    # network that came into reach after install (a new VLAN, a route that appeared) would
+    # otherwise stay invisible for the life of the container, because registration happens once
+    # and a self-updating agent never registers again. 0 disables re-detection.
+    reach_refresh_seconds: int = 21_600
     # max simultaneous TCP connects. Clamped at startup to what the file-descriptor budget allows.
     scan_concurrency: int = 2048
     # per-connect timeout (seconds) for the phase-2 full port sweep on a live host.

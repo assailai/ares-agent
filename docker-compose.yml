@@ -15,7 +15,7 @@
 
 services:
   ares-agent:
-    image: assailai/ares-agent:3.7.0  # pin to a version (see Settings -> Agents); avoid :latest
+    image: assailai/ares-agent:3.9.0  # pin to a version (see Settings -> Agents); avoid :latest
     container_name: ares-agent
     hostname: ares-agent
     volumes:
@@ -46,14 +46,22 @@ services:
       - ARES_TOKEN=${ARES_TOKEN:?set ARES_TOKEN to a registration token from the dashboard}
       # - ARES_URL=https://ares.assailai.com       # override when self-hosting
       # - ARES_NETWORKS=10.0.0.0/24,192.168.0.0/16 # override auto-detection with explicit CIDRs
-      # - ARES_SCAN_SCOPE=host-all                 # supernet16 (default) | attached | rfc1918 | host-all
+      #     A decision, not a hint: nothing widens it, so discovery below is switched off entirely.
+      # - ARES_SCAN_SCOPE=host-all                 # reachable (default) | supernet16 | attached | rfc1918 | host-all
+      #     "reachable" advertises the attached subnets AND every private network the agent can
+      #     demonstrably reach (the machine's routing and neighbour tables, plus a probe of private
+      #     space). It is what finds a customer's 10.x estate from an agent sitting on 172.23.x.
+      #     Discovery runs in the background, so the agent still comes online in seconds.
+      # - ARES_REACH_PROBE=false                   # keep the tables, skip the active probe
+      # - ARES_REACH_BUDGET_SECONDS=600            # wall clock the probe may spend
+      # - ARES_REACH_REFRESH_SECONDS=21600         # how often to look again; 0 = once, at startup
       # - ARES_HOST_ALIASES=sso.acme.internal=10.1.2.3,portal.acme.internal=10.1.2.4
       #     Pin a name the host's resolver will not answer. Only needed when the pin is not already
       #     in this host's /etc/hosts (mounted above).
     restart: unless-stopped
 
   ares-updater:
-    image: assailai/ares-updater:3.7.0
+    image: assailai/ares-updater:3.9.0
     container_name: ares-updater
     volumes:
       - ares-agent-data:/data:ro                  # reads the agent's update-target.json

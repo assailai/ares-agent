@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agent import control_plane, netdetect, scan, tlsconf
+from agent import control_plane, netdetect, reachability, scan, tlsconf
 from agent.config import settings
 from agent.health.system_metrics import read_cpu_percent, read_memory_percent
 from agent.hostpins import HostPins
@@ -46,7 +46,7 @@ class _AuthInvalidated(Exception):
 
 # scan concurrency resolved at startup against the file-descriptor budget (see
 # _resolve_scan_limits); per-connect timeouts + range breadth come from settings.
-_scan_limits = {"concurrency": 512}
+_scan_limits = {"concurrency": 512, "reach_concurrency": 512}
 # The pin table built at startup, shared with the identity phase so a discovered address can be
 # named from the host's own /etc/hosts. Module-level for the same reason as _scan_limits: a scan
 # task is driven by the poll loop and does not carry run()'s locals.
@@ -74,6 +74,11 @@ _INSECURE_OK_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 # production control-plane hosts that must ALWAYS verify TLS, even though they end in the
 # allowed .assailai.com suffix below. A real customer agent must never skip verification here.
 _INSECURE_DENY_HOSTS = ("ares.assailai.com",)
+# The networks reachability discovery last worked out, reported on every beat and refreshed on the
+# cadence in ARES_REACH_REFRESH_SECONDS. Module state for the same reason _cadence is: the heartbeat
+# loop and the re-detection task both need it, and threading it through every call between them
+# would touch a dozen signatures to move one list.
+_reachable: dict[str, list[str]] = {"networks": []}
 # cadence the server hands back at register / heartbeat (sane defaults until then).
 _cadence = {"heartbeat": 30, "poll": 5}
 # captured at import (process start) so heartbeats can report uptime since connect.
@@ -124,9 +129,22 @@ def _resolve_scan_limits() -> None:
             soft = target
     except (OSError, ValueError) as exc:
         logger.debug("could not raise file-descriptor limit: %s", exc)
-    concurrency = max(_MIN_CONCURRENCY, min(settings.scan_concurrency, soft - _FD_RESERVE))
+    budget = soft - _FD_RESERVE
+    concurrency = max(_MIN_CONCURRENCY, min(settings.scan_concurrency, budget))
     _scan_limits["concurrency"] = concurrency
-    logger.info("Scan concurrency=%d (file-descriptor soft limit=%d)", concurrency, soft)
+    # The reachability probe opens sockets from the same budget and would otherwise ask for its
+    # configured concurrency regardless of how many the container actually has, which is the same
+    # EMFILE the clamp above exists to prevent. It is bounded separately (and lower by default)
+    # because it reaches across the whole private space rather than one advertised network.
+    _scan_limits["reach_concurrency"] = max(
+        _MIN_CONCURRENCY, min(settings.reach_concurrency, budget)
+    )
+    logger.info(
+        "Scan concurrency=%d, reachability concurrency=%d (file-descriptor soft limit=%d)",
+        concurrency,
+        _scan_limits["reach_concurrency"],
+        soft,
+    )
 
 
 def _insecure_allowed(base_url: str) -> bool:
@@ -223,6 +241,33 @@ def _log_repeated_failure(what: str, failures: int, exc: Exception) -> None:
         logger.warning("%s failing (attempt %d): %s%s", what, failures, exc, _tls_hint(exc))
     else:
         logger.debug("%s failed (attempt %d): %s", what, failures, exc)
+
+
+async def _resolve_networks() -> list[str]:
+    """The CIDRs this agent advertises and scans, from whichever source the operator chose.
+
+    ARES_NETWORKS wins outright: an explicit list is a decision, and nothing should widen or
+    second-guess it. Otherwise the configured scope decides, and the default one (``reachable``)
+    adds the routing table, the neighbour table and an active probe of private space on top of the
+    attached subnets, so an agent finds the 10.x estate it can reach rather than only the /16 its
+    own interface sits in.
+
+    Never raises: discovery is best-effort, and an agent that cannot work out its networks must
+    still enroll (it can be given them in the dashboard) rather than fail to start.
+    """
+    override = settings.network_overrides()
+    if override:
+        return override
+    attached = netdetect.scan_targets(settings.scan_scope)
+    if settings.scan_scope != netdetect.REACHABLE_SCOPE:
+        return attached
+    return await reachability.discover(
+        attached=attached,
+        probe=settings.reach_probe,
+        concurrency=_scan_limits["reach_concurrency"],
+        budget_seconds=settings.reach_budget_seconds,
+        timeout=settings.scan_discovery_timeout,
+    )
 
 
 def _allowed_hosts(value: object) -> list[str]:
@@ -364,6 +409,7 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
                 cpu_percent=cpu_percent,
                 memory_percent=read_memory_percent(),
                 uptime_seconds=int(time.monotonic() - _AGENT_START_MONOTONIC),
+                detected_networks=_reachable["networks"],
             )
             # Announce "online" only once the control plane has actually accepted a beat, so
             # the log never claims the agent is up while its credentials are in fact rejected.
@@ -387,6 +433,10 @@ async def _heartbeat_loop(state: AgentState, tunnel: TunnelManager) -> None:
             tunnel.sync(
                 bool(resp.get("tunnel_required")),
                 _allowed_hosts(resp.get("tunnel_allowed_hosts")),
+                # The addresses an operator put in this agent's scope. Read from the same beat and
+                # parsed by the same fail-closed helper: a malformed field must cost the tunnel
+                # nothing and widen it by nothing.
+                _allowed_hosts(resp.get("scoped_hosts")),
             )
             if resp.get("restart_requested"):
                 logger.warning("Restart requested from dashboard; exiting for container restart.")
@@ -515,6 +565,54 @@ async def _run_task(token: str, task: dict) -> None:
     except Exception as exc:  # noqa: BLE001 - report any scan failure instead of dropping the task
         logger.error("Scan task %s failed: %s", task_id, exc)
         await control_plane.task_failed(settings, token, task_id, f"{type(exc).__name__}: {exc}")
+
+
+async def _redetect_loop(tunnel: TunnelManager | None = None) -> None:
+    """Work out what this agent can reach, then keep working it out.
+
+    Runs IMMEDIATELY rather than after a sleep, because it owns the first answer as well as every
+    later one: ``run`` enrolls on the attached subnets alone so the agent comes online in seconds,
+    and this is what widens the scope to everything reachable a minute or two later. Then it
+    repeats on the refresh cadence, because registration happens exactly once (a self-updating
+    agent keeps its token and never registers again), so a VLAN or a route that appeared six months
+    into an install would otherwise stay invisible for as long as the container lives.
+
+    The result is published for the heartbeat to report; this task never calls the control plane
+    itself, which is what stops a slow probe from ever delaying a beat.
+
+    Off entirely when the networks were given explicitly (ARES_NETWORKS is a decision, and nothing
+    should widen it) or when the interval is 0, which is the escape hatch for an estate that wants
+    discovery to happen once and then never unprompted.
+    """
+    if settings.network_overrides() or settings.scan_scope != netdetect.REACHABLE_SCOPE:
+        return
+    logger.info(
+        "Discovering reachable networks in the background (routes, neighbours%s).",
+        ", and a probe of private space" if settings.reach_probe else "",
+    )
+    interval = settings.reach_refresh_seconds
+    while True:
+        try:
+            networks = await _resolve_networks()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a failed re-detect keeps the previous answer
+            logger.debug("reachability re-detection failed: %s", exc)
+            networks = _reachable["networks"]
+        if networks != _reachable["networks"]:
+            logger.info("Reachable networks: %s", ", ".join(networks) or "none")
+            _reachable["networks"] = networks
+            # Widen what the tunnel will dial as well as what ares will scan. Both halves are
+            # needed and they are decided in different places: ares scans what it is told, the
+            # agent dials what IT believes it can reach, so reporting the networks without
+            # updating this would find hosts the tunnel then refuses. A tunnel already connected
+            # keeps the snapshot it was built with until it reconnects, which is a window of one
+            # reconnect on a 6-hourly cadence.
+            if tunnel is not None:
+                tunnel.set_networks(networks)
+        if interval <= 0:
+            return  # a single pass was asked for: the first answer is the only answer
+        await asyncio.sleep(interval)
 
 
 async def _poll_loop(state: AgentState) -> None:
@@ -674,6 +772,7 @@ async def _serve(state: AgentState, tunnel: TunnelManager) -> None:
     _liveness["last_contact"] = time.monotonic()
     tasks = {
         asyncio.create_task(_heartbeat_loop(state, tunnel)),
+        asyncio.create_task(_redetect_loop(tunnel)),
         asyncio.create_task(_poll_loop(state)),
         asyncio.create_task(_watchdog_loop()),
     }
@@ -722,6 +821,12 @@ async def run() -> int:
     pins = HostPins(aliases=settings.host_aliases)
     _host_pins = pins
     logger.info("Host pins: %s", pins.summary())
+    # The subnets this agent is ATTACHED to, which is cheap and instant. Reachability discovery is
+    # deliberately NOT awaited here: on the default scope it reaches across the customer's private
+    # space and takes minutes, and blocking enrollment on it would leave a freshly installed agent
+    # reading "Offline, never" in the dashboard for the whole of that. It runs as a background task
+    # instead (_redetect_loop) and reports through the heartbeat, so the agent is online in seconds
+    # and its scope widens underneath it as discovery finishes.
     networks = settings.network_overrides() or netdetect.scan_targets(settings.scan_scope)
     if not networks:
         logger.warning(
